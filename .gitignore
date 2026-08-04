@@ -1,0 +1,19 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+app/build
+
+# Decompilation artifacts (jadx)
+classes.dex
+classes.jar
+/bin/
+/lib/
+/aidl/
+/AndroidManifest.xml
