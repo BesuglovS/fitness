@@ -8,5 +8,6 @@ data class Workout(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val startTime: Long,
     val endTime: Long? = null,
-    val notes: String = ""
+    val notes: String = "",
+    val isCircuit: Boolean = false
 )

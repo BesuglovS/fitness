@@ -18,7 +18,12 @@ import ru.besuglovs.fitness.util.weightLabel
 
 enum class CircuitPhase { SETUP, EXERCISE, REP_ENTRY }
 
-data class RecordedSet(val weight: Double, val reps: Int)
+data class RecordedSet(
+    val weight: Double,
+    val reps: Int,
+    val durationSeconds: Int = 0,
+    val restSeconds: Int? = null
+)
 
 class CircuitViewModel(
     app: Application,
@@ -62,6 +67,12 @@ class CircuitViewModel(
     private val _restPaused = MutableStateFlow(false)
     val restPaused: StateFlow<Boolean> = _restPaused.asStateFlow()
 
+    private val _setPaused = MutableStateFlow(false)
+    val setPaused: StateFlow<Boolean> = _setPaused.asStateFlow()
+
+    private val _pauseElapsed = MutableStateFlow(0L)
+    val pauseElapsed: StateFlow<Long> = _pauseElapsed.asStateFlow()
+
     private val _lastWeights = MutableStateFlow<Map<Long, Double>>(emptyMap())
     val lastWeights: StateFlow<Map<Long, Double>> = _lastWeights.asStateFlow()
 
@@ -79,7 +90,12 @@ class CircuitViewModel(
 
     private var setJob: Job? = null
     private var restJob: Job? = null
-    private var setStartedAt = 0L
+    private var setRunningSeconds = 0L
+    private var _accumulatedPause = 0L
+
+    private val _setDurations = mutableMapOf<Long, MutableList<Int>>()
+    private val _durationIndex = mutableMapOf<Long, Int>()
+    private var _pendingRestSeconds: Int? = null
 
     init {
         viewModelScope.launch {
@@ -109,13 +125,14 @@ class CircuitViewModel(
     fun startTraining() {
         if (_selectedExercises.value.isEmpty()) return
         val initialWeights = _setupWeights.value.mapNotNull { (id, value) ->
-            value.replace(',', '.').toDoubleOrNull()?.takeIf { it > 0 }?.let { id to it }
+            value.replace(',', '.').toDoubleOrNull()?.takeIf { it >= 0 }?.let { id to it }
         }.toMap()
         _lastWeights.value = initialWeights
         _circuitNumber.value = 1
         _exerciseIndex.value = 0
         _activeExercise.value = _selectedExercises.value.first()
         _phase.value = CircuitPhase.EXERCISE
+        _accumulatedPause = 0L
         startSetTimer()
     }
 
@@ -123,6 +140,9 @@ class CircuitViewModel(
         val list = _selectedExercises.value
         if (list.isEmpty()) return
         stopTimers()
+        val exerciseId = _activeExercise.value?.id ?: list[_exerciseIndex.value].id
+        _setDurations.getOrPut(exerciseId) { mutableListOf() }.add(_setElapsed.value.toInt())
+        _accumulatedPause += _pauseElapsed.value
         if (_exerciseIndex.value < list.size - 1) {
             _exerciseIndex.value += 1
             _activeExercise.value = list[_exerciseIndex.value]
@@ -146,6 +166,7 @@ class CircuitViewModel(
     fun startNextCircuit() {
         if (_selectedExercises.value.isEmpty()) return
         commitEntrySets()
+        _pendingRestSeconds = _restElapsed.value.toInt()
         _circuitNumber.value += 1
         _exerciseIndex.value = 0
         _activeExercise.value = _selectedExercises.value.first()
@@ -161,7 +182,7 @@ class CircuitViewModel(
             for (ex in _selectedExercises.value) {
                 val w = _entryWeights.value[ex.id]?.replace(',', '.')?.toDoubleOrNull()
                 val r = _entryReps.value[ex.id]?.toIntOrNull()
-                if (w != null && w > 0 && r != null && r > 0) count++
+                if (w != null && w >= 0 && r != null && r > 0) count++
             }
         }
         return count
@@ -181,25 +202,39 @@ class CircuitViewModel(
     private fun commitEntrySets() {
         val updated = _completedSets.value.toMutableMap()
         val weights = _lastWeights.value.toMutableMap()
+        val rest = (_pendingRestSeconds ?: 0) + _accumulatedPause.toInt()
         for (ex in _selectedExercises.value) {
             val w = _entryWeights.value[ex.id]?.replace(',', '.')?.toDoubleOrNull() ?: continue
             val r = _entryReps.value[ex.id]?.toIntOrNull() ?: continue
-            if (w <= 0 || r <= 0) continue
-            updated[ex.id] = (updated[ex.id].orEmpty()) + RecordedSet(w, r)
+            if (w < 0 || r <= 0) continue
+            val durationIdx = _durationIndex[ex.id] ?: 0
+            val duration = _setDurations[ex.id]?.getOrNull(durationIdx) ?: 0
+            _durationIndex[ex.id] = durationIdx + 1
+            updated[ex.id] = (updated[ex.id].orEmpty()) +
+                RecordedSet(w, r, durationSeconds = duration, restSeconds = rest)
             weights[ex.id] = w
         }
+        _pendingRestSeconds = null
+        _accumulatedPause = 0L
         _completedSets.value = updated
         _lastWeights.value = weights
     }
 
     private fun startSetTimer() {
         setJob?.cancel()
-        setStartedAt = System.currentTimeMillis()
+        setRunningSeconds = 0L
         _setElapsed.value = 0
+        _pauseElapsed.value = 0
+        _setPaused.value = false
         setJob = viewModelScope.launch {
             while (_phase.value == CircuitPhase.EXERCISE) {
-                _setElapsed.value = (System.currentTimeMillis() - setStartedAt) / 1000
                 delay(1000)
+                if (_setPaused.value) {
+                    _pauseElapsed.value += 1
+                } else {
+                    setRunningSeconds += 1
+                    _setElapsed.value = setRunningSeconds
+                }
             }
         }
     }
@@ -223,6 +258,11 @@ class CircuitViewModel(
         _restPaused.value = !_restPaused.value
     }
 
+    fun toggleSetPause() {
+        if (_phase.value != CircuitPhase.EXERCISE) return
+        _setPaused.value = !_setPaused.value
+    }
+
     private fun stopTimers() {
         setJob?.cancel()
         restJob?.cancel()
@@ -243,7 +283,9 @@ class CircuitViewModel(
                             SetEntry(
                                 setNumber = i + 1,
                                 weightKg = s.weight,
-                                reps = s.reps
+                                reps = s.reps,
+                                restSeconds = s.restSeconds,
+                                durationSeconds = s.durationSeconds.takeIf { it > 0 }
                             )
                         }
                     )
@@ -252,7 +294,8 @@ class CircuitViewModel(
                 workoutId = workoutId,
                 endTime = System.currentTimeMillis(),
                 notes = "",
-                exercises = exercisesWithSets
+                exercises = exercisesWithSets,
+                isCircuit = true
             )
             _saved.value = true
         }

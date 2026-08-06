@@ -1,6 +1,9 @@
 package ru.besuglovs.fitness.ui.screens
 
+import android.app.Activity
 import androidx.activity.compose.BackHandler
+import androidx.core.view.WindowCompat
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -41,7 +44,9 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -51,6 +56,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -58,6 +65,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlin.math.PI
+import kotlin.math.cos
 import ru.besuglovs.fitness.data.Exercise
 import ru.besuglovs.fitness.ui.AppViewModelProvider
 import ru.besuglovs.fitness.ui.viewmodel.CircuitPhase
@@ -65,6 +74,9 @@ import ru.besuglovs.fitness.ui.viewmodel.CircuitViewModel
 import ru.besuglovs.fitness.util.formatTimer
 import ru.besuglovs.fitness.util.weightLabel
 
+private val LightGreenBg = Color(0xFFE8F5E9)
+private val LightYellowBg = Color(0xFFFFF9C4)
+private val LightRedBg = Color(0xFFFFEBEE)
 private val RestOverdueRed = Color(0xFFE53935)
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -80,6 +92,8 @@ fun CircuitScreen(onFinish: () -> Unit) {
     val exerciseIndex by vm.exerciseIndex.collectAsStateWithLifecycle()
     val activeExercise by vm.activeExercise.collectAsStateWithLifecycle()
     val setElapsed by vm.setElapsed.collectAsStateWithLifecycle()
+    val setPaused by vm.setPaused.collectAsStateWithLifecycle()
+    val pauseElapsed by vm.pauseElapsed.collectAsStateWithLifecycle()
     val restElapsed by vm.restElapsed.collectAsStateWithLifecycle()
     val completedSets by vm.completedSets.collectAsStateWithLifecycle()
     val entryWeights by vm.entryWeights.collectAsStateWithLifecycle()
@@ -96,9 +110,20 @@ fun CircuitScreen(onFinish: () -> Unit) {
         if (phase == CircuitPhase.SETUP) onFinish() else showFinishConfirm = true
     }
 
+    val backgroundColor = when (phase) {
+        CircuitPhase.SETUP -> MaterialTheme.colorScheme.surface
+        CircuitPhase.EXERCISE -> LightGreenBg
+        CircuitPhase.REP_ENTRY ->
+            if (restElapsed > vm.restLimitSeconds) LightRedBg else LightYellowBg
+    }
+
+    StatusBarForBackground(backgroundColor)
+
     Scaffold(
+        containerColor = backgroundColor,
         topBar = {
             TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = backgroundColor),
                 title = { Text("Круговая тренировка") },
                 navigationIcon = {
                     IconButton(onClick = {
@@ -146,6 +171,9 @@ fun CircuitScreen(onFinish: () -> Unit) {
                             exercise = ex,
                             lastWeight = vm.lastWeightOf(ex.id),
                             elapsedSeconds = setElapsed,
+                            paused = setPaused,
+                            pauseElapsed = pauseElapsed,
+                            onTogglePause = vm::toggleSetPause,
                             onComplete = vm::completeSet
                         )
                     }
@@ -196,6 +224,24 @@ fun CircuitScreen(onFinish: () -> Unit) {
     }
 }
 
+@Composable
+private fun StatusBarForBackground(backgroundColor: Color) {
+    val view = LocalView.current
+    if (view.isInEditMode) return
+    val window = (view.context as Activity).window
+    val controller = WindowCompat.getInsetsController(window, view)
+    val lightStatusBars = backgroundColor.luminance() > 0.5f
+
+    DisposableEffect(backgroundColor) {
+        val previousLight = controller.isAppearanceLightStatusBars
+        controller.isAppearanceLightStatusBars = lightStatusBars
+        onDispose {
+            controller.isAppearanceLightStatusBars = previousLight
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CircuitSetupContent(
     allExercises: List<Exercise>,
@@ -357,6 +403,9 @@ private fun CircuitExerciseContent(
     exercise: Exercise,
     lastWeight: Double?,
     elapsedSeconds: Long,
+    paused: Boolean,
+    pauseElapsed: Long,
+    onTogglePause: () -> Unit,
     onComplete: () -> Unit
 ) {
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -393,21 +442,29 @@ private fun CircuitExerciseContent(
             }
 
             CircuitBigTimer(
-                label = "Время подхода",
-                value = formatTimer(elapsedSeconds),
+                label = if (paused) "Пауза · внеплановый отдых" else "Время подхода",
+                value = formatTimer(if (paused) pauseElapsed else elapsedSeconds),
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = half)
                     .weight(1f)
+                    .clickable { onComplete() }
             )
 
+            Text(
+                "Нажми на таймер, чтобы завершить подход",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(12.dp))
+
             Button(
-                onClick = onComplete,
+                onClick = onTogglePause,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(56.dp)
             ) {
-                Text("Завершить подход", style = MaterialTheme.typography.titleMedium)
+                Text(if (paused) "Продолжить" else "Пауза", style = MaterialTheme.typography.titleMedium)
             }
         }
     }
@@ -430,15 +487,17 @@ private fun CircuitEntryContent(
 ) {
     val overdue = restElapsed > restLimit
     val blinkTransition = rememberInfiniteTransition(label = "restBlink")
-    val blinkAlpha by blinkTransition.animateFloat(
-        initialValue = 1f,
-        targetValue = 0.15f,
+    val blinkProgress by blinkTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(500),
-            repeatMode = RepeatMode.Reverse
+            animation = tween(durationMillis = 2000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
         ),
-        label = "restBlinkAlpha"
+        label = "restBlinkProgress"
     )
+    val blinkValue = (1f - cos(blinkProgress * (2f * PI.toFloat()))) / 2f
+    val valueAlpha = if (overdue && !restPaused) 0.15f + 0.85f * blinkValue else 1f
     var showEntries by remember { mutableStateOf(true) }
 
     Column(
@@ -505,7 +564,7 @@ private fun CircuitEntryContent(
             label = if (restPaused) "Отдых · Пауза" else "Отдых до следующего круга",
             value = formatTimer(restElapsed),
             valueColor = if (overdue) RestOverdueRed else MaterialTheme.colorScheme.onSurface,
-            alpha = if (overdue && !restPaused) blinkAlpha else 1f,
+            valueAlpha = valueAlpha,
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable { onToggleRestPause() }
@@ -552,10 +611,10 @@ private fun CircuitBigTimer(
     value: String,
     modifier: Modifier = Modifier,
     valueColor: Color = MaterialTheme.colorScheme.onSurface,
-    alpha: Float = 1f
+    valueAlpha: Float = 1f
 ) {
     BoxWithConstraints(
-        modifier = modifier.alpha(alpha),
+        modifier = modifier,
         contentAlignment = Alignment.Center
     ) {
         val fontSize = if (value.isNotEmpty()) {
@@ -582,7 +641,8 @@ private fun CircuitBigTimer(
                 fontWeight = FontWeight.Bold,
                 color = valueColor,
                 maxLines = 1,
-                softWrap = false
+                softWrap = false,
+                modifier = Modifier.alpha(valueAlpha)
             )
         }
     }

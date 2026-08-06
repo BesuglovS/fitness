@@ -18,8 +18,8 @@ abstract class WorkoutDao {
     @Insert
     abstract suspend fun insertSets(sets: List<SetEntry>)
 
-    @Query("UPDATE workouts SET endTime = :endTime, notes = :notes WHERE id = :id")
-    abstract suspend fun finishWorkout(id: Long, endTime: Long, notes: String)
+    @Query("UPDATE workouts SET endTime = :endTime, notes = :notes, isCircuit = :isCircuit WHERE id = :id")
+    abstract suspend fun finishWorkout(id: Long, endTime: Long, notes: String, isCircuit: Boolean)
 
     @Query("SELECT * FROM workouts WHERE endTime IS NULL LIMIT 1")
     abstract fun getUnfinished(): Flow<Workout?>
@@ -52,9 +52,10 @@ abstract class WorkoutDao {
         workoutId: Long,
         endTime: Long,
         notes: String,
-        exercises: List<ExerciseWithSets>
+        exercises: List<ExerciseWithSets>,
+        isCircuit: Boolean = false
     ) {
-        finishWorkout(workoutId, endTime, notes)
+        finishWorkout(workoutId, endTime, notes, isCircuit)
         var order = 0
         for (we in exercises) {
             val weId = insertWorkoutExercise(

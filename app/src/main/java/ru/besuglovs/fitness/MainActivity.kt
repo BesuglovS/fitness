@@ -1,10 +1,12 @@
 package ru.besuglovs.fitness
 
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Insights
@@ -39,6 +41,7 @@ import ru.besuglovs.fitness.ui.theme.FitnessTheme
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         enableEdgeToEdge()
         setContent {
             FitnessTheme {
@@ -97,7 +100,10 @@ fun FitnessRoot() {
         NavHost(
             navController = navController,
             startDestination = "home",
-            modifier = Modifier.padding(innerPadding)
+            modifier = Modifier.padding(
+                top = 0.dp,
+                bottom = innerPadding.calculateBottomPadding()
+            )
         ) {
             composable("home") {
                 HomeScreen(

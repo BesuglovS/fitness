@@ -24,8 +24,9 @@ class FitnessRepository(private val db: AppDatabase) {
         workoutId: Long,
         endTime: Long,
         notes: String,
-        exercises: List<ExerciseWithSets>
-    ) = db.workoutDao().saveWorkoutWithSets(workoutId, endTime, notes, exercises)
+        exercises: List<ExerciseWithSets>,
+        isCircuit: Boolean = false
+    ) = db.workoutDao().saveWorkoutWithSets(workoutId, endTime, notes, exercises, isCircuit)
 
     suspend fun discardUnfinished() = db.workoutDao().deleteUnfinished()
     suspend fun deleteWorkout(id: Long) = db.workoutDao().delete(id)

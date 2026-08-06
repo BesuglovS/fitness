@@ -1,9 +1,19 @@
 package ru.besuglovs.fitness.ui.screens
 
+import android.app.Activity
 import androidx.activity.compose.BackHandler
+import androidx.core.view.WindowCompat
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -15,6 +25,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -23,12 +34,15 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -36,7 +50,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -44,94 +61,136 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlin.math.PI
+import kotlin.math.cos
 import ru.besuglovs.fitness.data.Exercise
 import ru.besuglovs.fitness.ui.AppViewModelProvider
-import ru.besuglovs.fitness.ui.viewmodel.ActiveSetUi
+import ru.besuglovs.fitness.ui.viewmodel.WorkoutPhase
 import ru.besuglovs.fitness.ui.viewmodel.WorkoutViewModel
+import ru.besuglovs.fitness.util.formatTimer
+import ru.besuglovs.fitness.util.weightLabel
+
+private val LightGreenBg = Color(0xFFE8F5E9)
+private val LightYellowBg = Color(0xFFFFF9C4)
+private val LightRedBg = Color(0xFFFFEBEE)
+private val RestOverdueRed = Color(0xFFE53935)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun WorkoutScreen(onFinish: () -> Unit) {
     val vm: WorkoutViewModel = viewModel(factory = AppViewModelProvider.Factory)
-    val exercises by vm.exercises.collectAsStateWithLifecycle()
     val allExercises by vm.allExercises.collectAsStateWithLifecycle()
-    val restElapsed by vm.restElapsed.collectAsStateWithLifecycle()
-    val saved by vm.saved.collectAsStateWithLifecycle()
-    val selectedExerciseId by vm.selectedExerciseId.collectAsStateWithLifecycle()
-    val weightInput by vm.weightInput.collectAsStateWithLifecycle()
-    val activeSet by vm.activeSet.collectAsStateWithLifecycle()
+    val currentExercise by vm.currentExercise.collectAsStateWithLifecycle()
+    val setupWeights by vm.setupWeights.collectAsStateWithLifecycle()
+    val setupReps by vm.setupReps.collectAsStateWithLifecycle()
+    val phase by vm.phase.collectAsStateWithLifecycle()
     val setElapsed by vm.setElapsed.collectAsStateWithLifecycle()
+    val setPaused by vm.setPaused.collectAsStateWithLifecycle()
+    val pauseElapsed by vm.pauseElapsed.collectAsStateWithLifecycle()
+    val restElapsed by vm.restElapsed.collectAsStateWithLifecycle()
+    val entryWeight by vm.entryWeight.collectAsStateWithLifecycle()
+    val entryReps by vm.entryReps.collectAsStateWithLifecycle()
+    val entryExerciseId by vm.entryExerciseId.collectAsStateWithLifecycle()
+    val setCount by vm.completedSets.collectAsStateWithLifecycle()
+    val saved by vm.saved.collectAsStateWithLifecycle()
 
     var showFinishConfirm by remember { mutableStateOf(false) }
-    var showExitConfirm by remember { mutableStateOf(false) }
-    var showRepsDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(saved) {
         if (saved) onFinish()
     }
 
     BackHandler {
-        if (exercises.isNotEmpty()) showExitConfirm = true else onFinish()
+        if (phase == WorkoutPhase.SETUP) onFinish() else showFinishConfirm = true
     }
 
+    val backgroundColor = when (phase) {
+        WorkoutPhase.SETUP -> MaterialTheme.colorScheme.surface
+        WorkoutPhase.EXERCISE -> LightGreenBg
+        WorkoutPhase.REST ->
+            if (restElapsed > vm.restLimitSeconds) LightRedBg else LightYellowBg
+    }
+
+    StatusBarForBackground(backgroundColor)
+
     Scaffold(
+        containerColor = backgroundColor,
         topBar = {
             TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = backgroundColor),
                 title = { Text("Тренировка") },
                 navigationIcon = {
                     IconButton(onClick = {
-                        if (exercises.isNotEmpty()) showExitConfirm = true else onFinish()
+                        if (phase == WorkoutPhase.SETUP) onFinish() else showFinishConfirm = true
                     }) {
                         Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
                     }
                 },
                 actions = {
-                    TextButton(onClick = { showFinishConfirm = true }) {
-                        Text("Завершить")
+                    if (phase != WorkoutPhase.SETUP) {
+                        TextButton(onClick = { showFinishConfirm = true }) {
+                            Text("Завершить")
+                        }
                     }
                 }
             )
         }
     ) { padding ->
-        Column(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            val active = activeSet
-            if (active != null) {
-                SetInProgressContent(
-                    activeSet = active,
-                    elapsedSeconds = setElapsed,
-                    onComplete = { showRepsDialog = true }
-                )
-            } else {
-                RestPhaseContent(
-                    restElapsed = restElapsed,
-                    restLimitSeconds = vm.restLimitSeconds,
-                    exercises = allExercises,
-                    selectedExerciseId = selectedExerciseId,
-                    weight = weightInput,
-                    onSelectExercise = vm::selectExercise,
-                    onWeightChange = vm::updateWeight,
-                    onStartSet = vm::startSet
-                )
-            }
-        }
-    }
+            when (phase) {
+                WorkoutPhase.SETUP -> {
+                    WorkoutSetupContent(
+                        exercise = currentExercise,
+                        allExercises = allExercises,
+                        weight = setupWeights[currentExercise?.id].orEmpty(),
+                        reps = setupReps[currentExercise?.id].orEmpty(),
+                        onSelectExercise = vm::selectExercise,
+                        onWeightChange = { vm.updateSetupWeight(currentExercise?.id ?: -1L, it) },
+                        onRepsChange = { vm.updateSetupReps(currentExercise?.id ?: -1L, it) },
+                        onStart = vm::startTraining
+                    )
+                }
 
-    if (showRepsDialog) {
-        val active = activeSet
-        if (active != null) {
-            RepsDialog(
-                exerciseName = active.exercise.name,
-                weight = active.weight,
-                onConfirm = { reps ->
-                    vm.completeSet(reps)
-                    showRepsDialog = false
-                },
-                onDismiss = { showRepsDialog = false }
-            )
+                WorkoutPhase.EXERCISE -> {
+                    currentExercise?.let { ex ->
+                        WorkoutExerciseContent(
+                            exercise = ex,
+                            lastWeight = vm.lastWeightOf(ex.id),
+                            elapsedSeconds = setElapsed,
+                            paused = setPaused,
+                            pauseElapsed = pauseElapsed,
+                            onTogglePause = vm::toggleSetPause,
+                            onComplete = vm::completeSet
+                        )
+                    }
+                }
+
+                WorkoutPhase.REST -> {
+                    val entryEx = allExercises.firstOrNull { it.id == entryExerciseId }
+                    WorkoutRestContent(
+                        entryExercise = entryEx,
+                        currentExercise = currentExercise,
+                        allExercises = allExercises,
+                        entryWeight = entryWeight,
+                        entryReps = entryReps,
+                        currentWeight = setupWeights[currentExercise?.id].orEmpty(),
+                        currentReps = setupReps[currentExercise?.id].orEmpty(),
+                        restElapsed = restElapsed,
+                        restLimit = vm.restLimitSeconds,
+                        onEntryWeightChange = vm::updateEntryWeight,
+                        onEntryRepsChange = vm::updateEntryReps,
+                        onSelectCurrent = vm::selectExercise,
+                        onCurrentWeightChange = { vm.updateSetupWeight(currentExercise?.id ?: -1L, it) },
+                        onCurrentRepsChange = { vm.updateSetupReps(currentExercise?.id ?: -1L, it) },
+                        onNext = vm::nextApproach,
+                        onFinish = { showFinishConfirm = true }
+                    )
+                }
+            }
         }
     }
 
@@ -140,8 +199,8 @@ fun WorkoutScreen(onFinish: () -> Unit) {
             onDismissRequest = { showFinishConfirm = false },
             title = { Text("Завершить тренировку?") },
             text = {
-                val setsCount = exercises.sumOf { it.sets.size }
-                Text(if (setsCount == 0) "Подходов ещё не записано. Всё равно завершить?" else "Будет сохранено подходов: $setsCount")
+                val total = setCount.values.sumOf { it.size }
+                Text(if (total == 0) "Подходов ещё не записано. Всё равно завершить?" else "Будет сохранено подходов: $total")
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -158,86 +217,332 @@ fun WorkoutScreen(onFinish: () -> Unit) {
             }
         )
     }
+}
 
-    if (showExitConfirm) {
-        AlertDialog(
-            onDismissRequest = { showExitConfirm = false },
-            title = { Text("Выйти из тренировки?") },
-            text = { Text("Несохранённые подходы будут потеряны.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    showExitConfirm = false
-                    onFinish()
-                }) {
-                    Text("Выйти")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showExitConfirm = false }) {
-                    Text("Отмена")
-                }
-            }
-        )
+@Composable
+private fun StatusBarForBackground(backgroundColor: Color) {
+    val view = LocalView.current
+    if (view.isInEditMode) return
+    val window = (view.context as Activity).window
+    val controller = WindowCompat.getInsetsController(window, view)
+    val lightStatusBars = backgroundColor.luminance() > 0.5f
+
+    DisposableEffect(backgroundColor) {
+        val previousLight = controller.isAppearanceLightStatusBars
+        controller.isAppearanceLightStatusBars = lightStatusBars
+        onDispose {
+            controller.isAppearanceLightStatusBars = previousLight
+        }
     }
 }
 
 @Composable
-private fun RestPhaseContent(
-    restElapsed: Int?,
-    restLimitSeconds: Int,
-    exercises: List<Exercise>,
-    selectedExerciseId: Long?,
+private fun WorkoutSetupContent(
+    exercise: Exercise?,
+    allExercises: List<Exercise>,
     weight: String,
-    onSelectExercise: (Long) -> Unit,
+    reps: String,
+    onSelectExercise: (Exercise) -> Unit,
     onWeightChange: (String) -> Unit,
-    onStartSet: () -> Unit
+    onRepsChange: (String) -> Unit,
+    onStart: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Text(
+            "Выбери упражнение и укажи начальный вес и количество повторений.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        ExerciseDropdown(
+            exercises = allExercises,
+            selected = exercise,
+            onSelect = onSelectExercise
+        )
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp)
+            ) {
+                Text(
+                    exercise?.name ?: "Упражнение не выбрано",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(
+                        value = weight,
+                        onValueChange = { onWeightChange(it.filter { c -> c.isDigit() || c == '.' || c == ',' }) },
+                        label = { Text("Вес, кг") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = reps,
+                        onValueChange = { onRepsChange(it.filter(Char::isDigit).take(3)) },
+                        label = { Text("Повторения") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.weight(1f))
+
+        Button(
+            onClick = onStart,
+            enabled = exercise != null && weight.isNotBlank() && reps.isNotBlank(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp)
+        ) {
+            Text("Начать подход", style = MaterialTheme.typography.titleMedium)
+        }
+    }
+}
+
+@Composable
+private fun WorkoutExerciseContent(
+    exercise: Exercise,
+    lastWeight: Double?,
+    elapsedSeconds: Long,
+    paused: Boolean,
+    pauseElapsed: Long,
+    onTogglePause: () -> Unit,
+    onComplete: () -> Unit
 ) {
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val half = maxHeight * 0.5f
-        Column(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                exercise.name,
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
+            )
+            if (lastWeight != null) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Вес: ${weightLabel(lastWeight)} кг",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+
             BigTimer(
-                label = "Отдых",
-                value = formatSetTime((restElapsed ?: 0).toLong()),
-                valueColor = if (restElapsed != null && restElapsed > restLimitSeconds) {
-                    RestOverdueRed
-                } else {
-                    MaterialTheme.colorScheme.onSurface
-                },
+                label = if (paused) "Пауза · внеплановый отдых" else "Время подхода",
+                value = formatTimer(if (paused) pauseElapsed else elapsedSeconds),
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = half)
                     .weight(1f)
+                    .clickable { onComplete() }
             )
-            Column(
+
+            Text(
+                "Нажми на таймер, чтобы завершить подход",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(12.dp))
+
+            Button(
+                onClick = onTogglePause,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+                    .height(56.dp)
             ) {
-                ExerciseDropdown(
-                    exercises = exercises,
-                    selectedExerciseId = selectedExerciseId,
-                    onSelect = onSelectExercise
-                )
+                Text(if (paused) "Продолжить" else "Пауза", style = MaterialTheme.typography.titleMedium)
+            }
+        }
+    }
+}
 
-                OutlinedTextField(
-                    value = weight,
-                    onValueChange = onWeightChange,
-                    label = { Text("Вес, кг") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    modifier = Modifier.fillMaxWidth()
-                )
+@Composable
+private fun WorkoutRestContent(
+    entryExercise: Exercise?,
+    currentExercise: Exercise?,
+    allExercises: List<Exercise>,
+    entryWeight: String,
+    entryReps: String,
+    currentWeight: String,
+    currentReps: String,
+    restElapsed: Long,
+    restLimit: Int,
+    onEntryWeightChange: (String) -> Unit,
+    onEntryRepsChange: (String) -> Unit,
+    onSelectCurrent: (Exercise) -> Unit,
+    onCurrentWeightChange: (String) -> Unit,
+    onCurrentRepsChange: (String) -> Unit,
+    onNext: () -> Unit,
+    onFinish: () -> Unit
+) {
+    val overdue = restElapsed > restLimit
+    val blinkTransition = rememberInfiniteTransition(label = "restBlink")
+    val blinkProgress by blinkTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 2000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "restBlinkProgress"
+    )
+    val blinkValue = (1f - cos(blinkProgress * (2f * PI.toFloat()))) / 2f
+    val valueAlpha = if (overdue) 0.15f + 0.85f * blinkValue else 1f
+    var showEntries by remember { mutableStateOf(true) }
 
-                Button(
-                    onClick = onStartSet,
-                    enabled = selectedExerciseId != null && weight.trim().isNotEmpty(),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(56.dp)
-                ) {
-                    Text("Начать подход", style = MaterialTheme.typography.titleMedium)
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        if (showEntries) {
+            Column(
+                modifier = Modifier
+                    .weight(1f),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                entryExercise?.let { ex ->
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                            Text(
+                                "Выполнено · ${ex.name}",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                OutlinedTextField(
+                                    value = entryWeight,
+                                    onValueChange = { onEntryWeightChange(it.filter { c -> c.isDigit() || c == '.' || c == ',' }) },
+                                    label = { Text("Вес, кг") },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                OutlinedTextField(
+                                    value = entryReps,
+                                    onValueChange = { onEntryRepsChange(it.filter(Char::isDigit).take(3)) },
+                                    label = { Text("Повторения") },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+                    }
                 }
+
+                Text(
+                    "Следующее упражнение",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                ExerciseDropdown(
+                    exercises = allExercises,
+                    selected = currentExercise,
+                    onSelect = onSelectCurrent
+                )
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                        Text(
+                            currentExercise?.name ?: "Упражнение не выбрано",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            OutlinedTextField(
+                                value = currentWeight,
+                                onValueChange = { onCurrentWeightChange(it.filter { c -> c.isDigit() || c == '.' || c == ',' }) },
+                                label = { Text("Вес, кг") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedTextField(
+                                value = currentReps,
+                                onValueChange = { onCurrentRepsChange(it.filter(Char::isDigit).take(3)) },
+                                label = { Text("Повторения") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        val canNext = currentExercise != null && currentWeight.isNotBlank() && currentReps.isNotBlank()
+
+        BigTimer(
+            label = "Отдых",
+            value = formatTimer(restElapsed),
+            valueColor = if (overdue) RestOverdueRed else MaterialTheme.colorScheme.onSurface,
+            valueAlpha = valueAlpha,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = canNext) { onNext() }
+                .then(
+                    if (showEntries) Modifier.height(150.dp)
+                    else Modifier.weight(1f)
+                )
+        )
+
+        Text(
+            "Нажми на таймер, чтобы начать следующий подход",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        TextButton(
+            onClick = { showEntries = !showEntries },
+            modifier = Modifier.align(Alignment.CenterHorizontally)
+        ) {
+            Text(if (showEntries) "Скрыть" else "Показать", style = MaterialTheme.typography.bodyMedium)
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Button(
+                onClick = onNext,
+                enabled = currentExercise != null && currentWeight.isNotBlank() && currentReps.isNotBlank(),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(40.dp)
+            ) {
+                Text("Следующий", style = MaterialTheme.typography.bodyLarge)
+            }
+            OutlinedButton(
+                onClick = onFinish,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(40.dp)
+            ) {
+                Text("Завершить", style = MaterialTheme.typography.bodyLarge)
             }
         }
     }
@@ -247,10 +552,9 @@ private fun RestPhaseContent(
 @Composable
 private fun ExerciseDropdown(
     exercises: List<Exercise>,
-    selectedExerciseId: Long?,
-    onSelect: (Long) -> Unit
+    selected: Exercise?,
+    onSelect: (Exercise) -> Unit
 ) {
-    val selected = exercises.firstOrNull { it.id == selectedExerciseId }
     var expanded by remember { mutableStateOf(false) }
 
     ExposedDropdownMenuBox(
@@ -281,7 +585,7 @@ private fun ExerciseDropdown(
                     DropdownMenuItem(
                         text = { Text(ex.name) },
                         onClick = {
-                            onSelect(ex.id)
+                            onSelect(ex)
                             expanded = false
                         }
                     )
@@ -292,139 +596,46 @@ private fun ExerciseDropdown(
 }
 
 @Composable
-private fun SetInProgressContent(
-    activeSet: ActiveSetUi,
-    elapsedSeconds: Long,
-    onComplete: () -> Unit
-) {
-    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val half = maxHeight * 0.5f
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                activeSet.exercise.name,
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "${activeSet.weight} кг",
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            BigTimer(
-                label = "Время подхода",
-                value = formatSetTime(elapsedSeconds),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = half)
-                    .weight(1f)
-            )
-
-            Button(
-                onClick = onComplete,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp)
-            ) {
-                Text("Завершить подход", style = MaterialTheme.typography.titleMedium)
-            }
-        }
-    }
-}
-
-@Composable
 private fun BigTimer(
-    label: String,
+    label: String? = null,
     value: String,
     modifier: Modifier = Modifier,
-    valueColor: Color = MaterialTheme.colorScheme.onSurface
+    valueColor: Color = MaterialTheme.colorScheme.onSurface,
+    valueAlpha: Float = 1f
 ) {
     BoxWithConstraints(
         modifier = modifier,
         contentAlignment = Alignment.Center
     ) {
         val fontSize = if (value.isNotEmpty()) {
-            (maxWidth.value / (value.length * 0.6f)).coerceIn(64f, 220f)
+            val byWidth = maxWidth.value / (value.length * 0.6f)
+            val byHeight = maxHeight.value * 0.55f
+            minOf(byWidth, byHeight).coerceIn(32f, 400f)
         } else {
-            120f
+            (maxHeight.value * 0.55f).coerceIn(32f, 300f)
         }
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            Text(
-                label,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(8.dp))
+            if (label != null) {
+                Text(
+                    label,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(4.dp))
+            }
             Text(
                 value,
                 fontSize = fontSize.sp,
                 fontWeight = FontWeight.Bold,
                 color = valueColor,
                 maxLines = 1,
-                softWrap = false
+                softWrap = false,
+                modifier = Modifier.alpha(valueAlpha)
             )
         }
     }
-}
-
-private val RestOverdueRed = Color(0xFFE53935)
-
-@Composable
-private fun RepsDialog(
-    exerciseName: String,
-    weight: String,
-    onConfirm: (Int) -> Unit,
-    onDismiss: () -> Unit
-) {
-    var repsInput by remember { mutableStateOf("") }
-    val reps = repsInput.toIntOrNull()
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Завершить подход") },
-        text = {
-            Column {
-                Text("$exerciseName · $weight кг", style = MaterialTheme.typography.bodyLarge)
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = repsInput,
-                    onValueChange = { repsInput = it.filter(Char::isDigit).take(3) },
-                    label = { Text("Повторения") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = { reps?.takeIf { it > 0 }?.let(onConfirm) },
-                enabled = reps?.let { it > 0 } == true
-            ) {
-                Text("Сохранить")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Отмена")
-            }
-        }
-    )
-}
-
-private fun formatSetTime(seconds: Long): String {
-    val m = seconds / 60
-    val s = seconds % 60
-    return "%d:%02d".format(m, s)
 }

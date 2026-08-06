@@ -24,5 +24,6 @@ data class SetEntry(
     val weightKg: Double? = null,
     val reps: Int? = null,
     val restSeconds: Int? = null,
+    val durationSeconds: Int? = null,
     val doneAt: Long = System.currentTimeMillis()
 )
