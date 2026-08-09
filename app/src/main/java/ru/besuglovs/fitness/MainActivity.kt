@@ -109,6 +109,10 @@ fun FitnessRoot() {
                 HomeScreen(
                     onStartWorkout = { id, restSeconds -> navController.navigate("workout/$id?restSeconds=$restSeconds") },
                     onStartCircuit = { id, restSeconds -> navController.navigate("circuit/$id?restSeconds=$restSeconds") },
+                    onResumeWorkout = { id, isCircuit ->
+                        if (isCircuit) navController.navigate("circuit/$id")
+                        else navController.navigate("workout/$id")
+                    },
                     onOpenLibrary = { navController.navigate("library") },
                     onOpenWorkout = { id -> navController.navigate("detail/$id") }
                 )
@@ -124,7 +128,8 @@ fun FitnessRoot() {
                 )
             ) {
                 WorkoutScreen(
-                    onFinish = { navController.popBackStack("home", inclusive = false) }
+                    onFinish = { navController.popBackStack("home", inclusive = false) },
+                    onExit = { navController.popBackStack("home", inclusive = false) }
                 )
             }
             composable(
@@ -138,7 +143,8 @@ fun FitnessRoot() {
                 )
             ) {
                 CircuitScreen(
-                    onFinish = { navController.popBackStack("home", inclusive = false) }
+                    onFinish = { navController.popBackStack("home", inclusive = false) },
+                    onExit = { navController.popBackStack("home", inclusive = false) }
                 )
             }
             composable("library") {

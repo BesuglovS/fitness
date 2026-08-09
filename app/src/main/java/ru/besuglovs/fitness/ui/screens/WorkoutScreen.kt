@@ -21,6 +21,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
@@ -67,6 +69,7 @@ import ru.besuglovs.fitness.data.Exercise
 import ru.besuglovs.fitness.ui.AppViewModelProvider
 import ru.besuglovs.fitness.ui.viewmodel.WorkoutPhase
 import ru.besuglovs.fitness.ui.viewmodel.WorkoutViewModel
+import ru.besuglovs.fitness.util.formatGap
 import ru.besuglovs.fitness.util.formatTimer
 import ru.besuglovs.fitness.util.weightLabel
 
@@ -77,7 +80,7 @@ private val RestOverdueRed = Color(0xFFE53935)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun WorkoutScreen(onFinish: () -> Unit) {
+fun WorkoutScreen(onFinish: () -> Unit, onExit: () -> Unit) {
     val vm: WorkoutViewModel = viewModel(factory = AppViewModelProvider.Factory)
     val allExercises by vm.allExercises.collectAsStateWithLifecycle()
     val currentExercise by vm.currentExercise.collectAsStateWithLifecycle()
@@ -91,17 +94,24 @@ fun WorkoutScreen(onFinish: () -> Unit) {
     val entryWeight by vm.entryWeight.collectAsStateWithLifecycle()
     val entryReps by vm.entryReps.collectAsStateWithLifecycle()
     val entryExerciseId by vm.entryExerciseId.collectAsStateWithLifecycle()
-    val setCount by vm.completedSets.collectAsStateWithLifecycle()
     val saved by vm.saved.collectAsStateWithLifecycle()
+    val exited by vm.exited.collectAsStateWithLifecycle()
+    val resumeGapSeconds by vm.resumeGapSeconds.collectAsStateWithLifecycle()
 
     var showFinishConfirm by remember { mutableStateOf(false) }
+    var showExitConfirm by remember { mutableStateOf(false) }
+    var showAddExercise by remember { mutableStateOf(false) }
 
     LaunchedEffect(saved) {
         if (saved) onFinish()
     }
 
+    LaunchedEffect(exited) {
+        if (exited) onExit()
+    }
+
     BackHandler {
-        if (phase == WorkoutPhase.SETUP) onFinish() else showFinishConfirm = true
+        if (phase == WorkoutPhase.SETUP) onExit() else showExitConfirm = true
     }
 
     val backgroundColor = when (phase) {
@@ -121,7 +131,7 @@ fun WorkoutScreen(onFinish: () -> Unit) {
                 title = { Text("Тренировка") },
                 navigationIcon = {
                     IconButton(onClick = {
-                        if (phase == WorkoutPhase.SETUP) onFinish() else showFinishConfirm = true
+                        if (phase == WorkoutPhase.SETUP) onExit() else showExitConfirm = true
                     }) {
                         Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
                     }
@@ -159,6 +169,7 @@ fun WorkoutScreen(onFinish: () -> Unit) {
                     currentExercise?.let { ex ->
                         WorkoutExerciseContent(
                             exercise = ex,
+                            setNumber = vm.nextSetNumber(ex.id),
                             lastWeight = vm.lastWeightOf(ex.id),
                             elapsedSeconds = setElapsed,
                             paused = setPaused,
@@ -173,10 +184,12 @@ fun WorkoutScreen(onFinish: () -> Unit) {
                     val entryEx = allExercises.firstOrNull { it.id == entryExerciseId }
                     WorkoutRestContent(
                         entryExercise = entryEx,
+                        entrySetNumber = vm.nextSetNumber(entryExerciseId),
                         currentExercise = currentExercise,
                         allExercises = allExercises,
                         entryWeight = entryWeight,
                         entryReps = entryReps,
+                        entryValid = vm.isEntrySetValid(),
                         currentWeight = setupWeights[currentExercise?.id].orEmpty(),
                         currentReps = setupReps[currentExercise?.id].orEmpty(),
                         restElapsed = restElapsed,
@@ -187,7 +200,8 @@ fun WorkoutScreen(onFinish: () -> Unit) {
                         onCurrentWeightChange = { vm.updateSetupWeight(currentExercise?.id ?: -1L, it) },
                         onCurrentRepsChange = { vm.updateSetupReps(currentExercise?.id ?: -1L, it) },
                         onNext = vm::nextApproach,
-                        onFinish = { showFinishConfirm = true }
+                        onFinish = { showFinishConfirm = true },
+                        onAddExercise = { showAddExercise = true }
                     )
                 }
             }
@@ -199,7 +213,7 @@ fun WorkoutScreen(onFinish: () -> Unit) {
             onDismissRequest = { showFinishConfirm = false },
             title = { Text("Завершить тренировку?") },
             text = {
-                val total = setCount.values.sumOf { it.size }
+                val total = vm.totalSetsCount()
                 Text(if (total == 0) "Подходов ещё не записано. Всё равно завершить?" else "Будет сохранено подходов: $total")
             },
             confirmButton = {
@@ -215,6 +229,60 @@ fun WorkoutScreen(onFinish: () -> Unit) {
                     Text("Отмена")
                 }
             }
+        )
+    }
+
+    if (showExitConfirm) {
+        AlertDialog(
+            onDismissRequest = { showExitConfirm = false },
+            title = { Text("Выйти из тренировки?") },
+            text = { Text("Записанные подходы сохранятся, и ты сможешь продолжить тренировку позже.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showExitConfirm = false
+                    vm.saveAndExit()
+                }) {
+                    Text("Выйти")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExitConfirm = false }) {
+                    Text("Отмена")
+                }
+            }
+        )
+    }
+
+    if (resumeGapSeconds != null && !showExitConfirm && !showFinishConfirm) {
+        val gapText = formatGap(resumeGapSeconds ?: 0L)
+        AlertDialog(
+            onDismissRequest = { },
+            title = { Text("Продолжить тренировку") },
+            text = {
+                Text("Ты отсутствовал $gapText. Считать это время отдыхом?")
+            },
+            confirmButton = {
+                TextButton(onClick = { vm.onResumeGapDecided(true) }) {
+                    Text("Да, отдых")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { vm.onResumeGapDecided(false) }) {
+                    Text("Нет")
+                }
+            }
+        )
+    }
+
+    if (showAddExercise) {
+        AddExerciseDialog(
+            onSave = { name, muscleGroup, category ->
+                showAddExercise = false
+                vm.addExercise(name, muscleGroup, category) { created ->
+                    vm.selectExercise(created)
+                }
+            },
+            onDismiss = { showAddExercise = false }
         )
     }
 }
@@ -315,6 +383,7 @@ private fun WorkoutSetupContent(
 @Composable
 private fun WorkoutExerciseContent(
     exercise: Exercise,
+    setNumber: Int,
     lastWeight: Double?,
     elapsedSeconds: Long,
     paused: Boolean,
@@ -335,6 +404,12 @@ private fun WorkoutExerciseContent(
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold,
                 textAlign = TextAlign.Center
+            )
+            Text(
+                "Подход $setNumber",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary
             )
             if (lastWeight != null) {
                 Spacer(Modifier.height(4.dp))
@@ -377,10 +452,12 @@ private fun WorkoutExerciseContent(
 @Composable
 private fun WorkoutRestContent(
     entryExercise: Exercise?,
+    entrySetNumber: Int,
     currentExercise: Exercise?,
     allExercises: List<Exercise>,
     entryWeight: String,
     entryReps: String,
+    entryValid: Boolean,
     currentWeight: String,
     currentReps: String,
     restElapsed: Long,
@@ -391,7 +468,8 @@ private fun WorkoutRestContent(
     onCurrentWeightChange: (String) -> Unit,
     onCurrentRepsChange: (String) -> Unit,
     onNext: () -> Unit,
-    onFinish: () -> Unit
+    onFinish: () -> Unit,
+    onAddExercise: () -> Unit
 ) {
     val overdue = restElapsed > restLimit
     val blinkTransition = rememberInfiniteTransition(label = "restBlink")
@@ -424,7 +502,7 @@ private fun WorkoutRestContent(
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
                             Text(
-                                "Выполнено · ${ex.name}",
+                                "Выполнено · ${ex.name} · подход $entrySetNumber",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Medium
                             )
@@ -461,6 +539,12 @@ private fun WorkoutRestContent(
                     selected = currentExercise,
                     onSelect = onSelectCurrent
                 )
+                TextButton(
+                    onClick = onAddExercise,
+                    modifier = Modifier.align(Alignment.CenterHorizontally)
+                ) {
+                    Text("+ Добавить новое упражнение", style = MaterialTheme.typography.bodyMedium)
+                }
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
                         Text(
@@ -492,7 +576,7 @@ private fun WorkoutRestContent(
             }
         }
 
-        val canNext = currentExercise != null && currentWeight.isNotBlank() && currentReps.isNotBlank()
+        val canNext = entryValid && currentExercise != null && currentWeight.isNotBlank() && currentReps.isNotBlank()
 
         BigTimer(
             label = "Отдых",
@@ -529,7 +613,7 @@ private fun WorkoutRestContent(
         ) {
             Button(
                 onClick = onNext,
-                enabled = currentExercise != null && currentWeight.isNotBlank() && currentReps.isNotBlank(),
+                enabled = canNext,
                 modifier = Modifier
                     .weight(1f)
                     .height(40.dp)
@@ -590,6 +674,104 @@ private fun ExerciseDropdown(
                         }
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AddExerciseDialog(
+    onSave: (String, String, String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    var category by remember { mutableStateOf("Силовая") }
+    var muscleGroup by remember { mutableStateOf("") }
+    var showCategoryMenu by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Новое упражнение") },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            ) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Название") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(12.dp))
+                CategoryDropdown(
+                    value = category,
+                    options = listOf("Силовая", "Кардио", "Свободный вес", "Растяжка", "Другое"),
+                    expanded = showCategoryMenu,
+                    onExpandedChange = { showCategoryMenu = it },
+                    onSelect = { category = it }
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = muscleGroup,
+                    onValueChange = { muscleGroup = it },
+                    label = { Text("Группа мышц") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(name, muscleGroup, category) },
+                enabled = name.isNotBlank()
+            ) {
+                Text("Добавить")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Отмена")
+            }
+        }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CategoryDropdown(
+    value: String,
+    options: List<String>,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    onSelect: (String) -> Unit
+) {
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = onExpandedChange
+    ) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = {},
+            readOnly = true,
+            label = { Text("Категория") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier
+                .menuAnchor()
+                .fillMaxWidth()
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { onExpandedChange(false) }
+        ) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option) },
+                    onClick = {
+                        onSelect(option)
+                        onExpandedChange(false)
+                    }
+                )
             }
         }
     }

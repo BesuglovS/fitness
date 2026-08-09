@@ -9,5 +9,7 @@ data class Workout(
     val startTime: Long,
     val endTime: Long? = null,
     val notes: String = "",
-    val isCircuit: Boolean = false
+    val isCircuit: Boolean = false,
+    val sessionJson: String? = null,
+    val pausedAt: Long? = null
 )

@@ -18,10 +18,13 @@ abstract class WorkoutDao {
     @Insert
     abstract suspend fun insertSets(sets: List<SetEntry>)
 
-    @Query("UPDATE workouts SET endTime = :endTime, notes = :notes, isCircuit = :isCircuit WHERE id = :id")
+    @Query("UPDATE workouts SET endTime = :endTime, notes = :notes, isCircuit = :isCircuit, sessionJson = NULL, pausedAt = NULL WHERE id = :id")
     abstract suspend fun finishWorkout(id: Long, endTime: Long, notes: String, isCircuit: Boolean)
 
-    @Query("SELECT * FROM workouts WHERE endTime IS NULL LIMIT 1")
+    @Query("UPDATE workouts SET sessionJson = :sessionJson, pausedAt = :pausedAt, isCircuit = :isCircuit WHERE id = :id")
+    abstract suspend fun saveSession(id: Long, sessionJson: String, pausedAt: Long, isCircuit: Boolean)
+
+    @Query("SELECT * FROM workouts WHERE endTime IS NULL ORDER BY id DESC LIMIT 1")
     abstract fun getUnfinished(): Flow<Workout?>
 
     @Query("SELECT * FROM workouts ORDER BY startTime DESC")
@@ -36,6 +39,9 @@ abstract class WorkoutDao {
 
     @Query("SELECT * FROM workouts WHERE id = :id")
     abstract fun getById(id: Long): Flow<Workout?>
+
+    @Query("SELECT * FROM workouts WHERE id = :id")
+    abstract suspend fun getByIdOnce(id: Long): Workout?
 
     @Query("DELETE FROM workouts WHERE endTime IS NULL")
     abstract suspend fun deleteUnfinished()

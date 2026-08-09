@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FitnessCenter
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
@@ -24,7 +23,6 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -58,6 +56,7 @@ import ru.besuglovs.fitness.util.formatDuration
 fun HomeScreen(
     onStartWorkout: (Long, Int) -> Unit,
     onStartCircuit: (Long, Int) -> Unit,
+    onResumeWorkout: (Long, Boolean) -> Unit,
     onOpenLibrary: () -> Unit,
     onOpenWorkout: (Long) -> Unit
 ) {
@@ -158,10 +157,28 @@ fun HomeScreen(
                                 style = MaterialTheme.typography.bodyMedium
                             )
                             Spacer(Modifier.height(8.dp))
-                            TextButton(onClick = { showDiscardConfirm = true }) {
-                                Icon(Icons.Filled.Delete, contentDescription = null)
-                                Spacer(Modifier.width(4.dp))
-                                Text("Удалить её и начать заново")
+                            Text(
+                                "Продолжи с того места, где остановился.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Button(
+                                    onClick = {
+                                        onResumeWorkout(unfinished!!.id, unfinished!!.isCircuit)
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("Продолжить")
+                                }
+                                TextButton(onClick = { showDiscardConfirm = true }) {
+                                    Text("Удалить")
+                                }
                             }
                         }
                     }

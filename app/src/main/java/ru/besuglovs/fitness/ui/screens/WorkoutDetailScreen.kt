@@ -357,12 +357,15 @@ private fun CircuitCircleCard(
             }
             HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
-            exercises.forEach { we ->
-                val set = we.sets.firstOrNull { it.setNumber == circleNumber }
-                if (set != null) {
+            exercises
+                .mapNotNull { we ->
+                    val set = we.sets.firstOrNull { it.setNumber == circleNumber }
+                    if (set != null) we to set else null
+                }
+                .sortedBy { (_, set) -> set.doneAt }
+                .forEach { (we, set) ->
                     CircuitExerciseRow(we = we, set = set)
                 }
-            }
         }
     }
 }

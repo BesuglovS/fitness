@@ -19,7 +19,10 @@ class FitnessRepository(private val db: AppDatabase) {
     fun unfinishedWorkout(): Flow<Workout?> = db.workoutDao().getUnfinished()
     fun workouts(): Flow<List<Workout>> = db.workoutDao().getAll()
     fun workoutDetails(id: Long): Flow<WorkoutWithDetails?> = db.workoutDao().getWorkoutDetails(id)
+    suspend fun getWorkoutOnce(id: Long): Workout? = db.workoutDao().getByIdOnce(id)
     suspend fun createWorkout(): Long = db.workoutDao().insert(Workout(startTime = System.currentTimeMillis()))
+    suspend fun saveSession(workoutId: Long, sessionJson: String, isCircuit: Boolean) =
+        db.workoutDao().saveSession(workoutId, sessionJson, System.currentTimeMillis(), isCircuit)
     suspend fun saveWorkoutWithSets(
         workoutId: Long,
         endTime: Long,

@@ -9,6 +9,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -41,6 +42,7 @@ import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -56,6 +58,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
@@ -71,6 +74,7 @@ import ru.besuglovs.fitness.data.Exercise
 import ru.besuglovs.fitness.ui.AppViewModelProvider
 import ru.besuglovs.fitness.ui.viewmodel.CircuitPhase
 import ru.besuglovs.fitness.ui.viewmodel.CircuitViewModel
+import ru.besuglovs.fitness.util.formatGap
 import ru.besuglovs.fitness.util.formatTimer
 import ru.besuglovs.fitness.util.weightLabel
 
@@ -78,10 +82,13 @@ private val LightGreenBg = Color(0xFFE8F5E9)
 private val LightYellowBg = Color(0xFFFFF9C4)
 private val LightRedBg = Color(0xFFFFEBEE)
 private val RestOverdueRed = Color(0xFFE53935)
+private val DoneButtonBg = Color(0xFFBDBDBD)
+private val DoneButtonBorder = Color(0xFFE53935)
+private val AvailableButtonBorder = Color(0xFF66BB6A)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CircuitScreen(onFinish: () -> Unit) {
+fun CircuitScreen(onFinish: () -> Unit, onExit: () -> Unit) {
     val vm: CircuitViewModel = viewModel(factory = AppViewModelProvider.Factory)
     val allExercises by vm.allExercises.collectAsStateWithLifecycle()
     val selectedExercises by vm.selectedExercises.collectAsStateWithLifecycle()
@@ -89,8 +96,8 @@ fun CircuitScreen(onFinish: () -> Unit) {
     val setupReps by vm.setupReps.collectAsStateWithLifecycle()
     val phase by vm.phase.collectAsStateWithLifecycle()
     val circuitNumber by vm.circuitNumber.collectAsStateWithLifecycle()
-    val exerciseIndex by vm.exerciseIndex.collectAsStateWithLifecycle()
     val activeExercise by vm.activeExercise.collectAsStateWithLifecycle()
+    val roundCompletedIds by vm.roundCompletedIds.collectAsStateWithLifecycle()
     val setElapsed by vm.setElapsed.collectAsStateWithLifecycle()
     val setPaused by vm.setPaused.collectAsStateWithLifecycle()
     val pauseElapsed by vm.pauseElapsed.collectAsStateWithLifecycle()
@@ -99,15 +106,22 @@ fun CircuitScreen(onFinish: () -> Unit) {
     val entryWeights by vm.entryWeights.collectAsStateWithLifecycle()
     val entryReps by vm.entryReps.collectAsStateWithLifecycle()
     val saved by vm.saved.collectAsStateWithLifecycle()
+    val exited by vm.exited.collectAsStateWithLifecycle()
+    val resumeGapSeconds by vm.resumeGapSeconds.collectAsStateWithLifecycle()
 
     var showFinishConfirm by remember { mutableStateOf(false) }
+    var showExitConfirm by remember { mutableStateOf(false) }
 
     LaunchedEffect(saved) {
         if (saved) onFinish()
     }
 
+    LaunchedEffect(exited) {
+        if (exited) onExit()
+    }
+
     BackHandler {
-        if (phase == CircuitPhase.SETUP) onFinish() else showFinishConfirm = true
+        if (phase == CircuitPhase.SETUP) onExit() else showExitConfirm = true
     }
 
     val backgroundColor = when (phase) {
@@ -127,7 +141,7 @@ fun CircuitScreen(onFinish: () -> Unit) {
                 title = { Text("Круговая тренировка") },
                 navigationIcon = {
                     IconButton(onClick = {
-                        if (phase == CircuitPhase.SETUP) onFinish() else showFinishConfirm = true
+                        if (phase == CircuitPhase.SETUP) onExit() else showExitConfirm = true
                     }) {
                         Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
                     }
@@ -163,20 +177,20 @@ fun CircuitScreen(onFinish: () -> Unit) {
                 }
 
                 CircuitPhase.EXERCISE -> {
-                    activeExercise?.let { ex ->
-                        CircuitExerciseContent(
-                            circuitNumber = circuitNumber,
-                            index = exerciseIndex,
-                            count = selectedExercises.size,
-                            exercise = ex,
-                            lastWeight = vm.lastWeightOf(ex.id),
-                            elapsedSeconds = setElapsed,
-                            paused = setPaused,
-                            pauseElapsed = pauseElapsed,
-                            onTogglePause = vm::toggleSetPause,
-                            onComplete = vm::completeSet
-                        )
-                    }
+                    CircuitExerciseContent(
+                        circuitNumber = circuitNumber,
+                        exercises = selectedExercises,
+                        activeExercise = activeExercise,
+                        roundCompletedIds = roundCompletedIds,
+                        lastWeight = { id -> vm.lastWeightOf(id) },
+                        elapsedSeconds = setElapsed,
+                        paused = setPaused,
+                        pauseElapsed = pauseElapsed,
+                        onSelectExercise = vm::selectExercise,
+                        onSelectNext = vm::selectNextExercise,
+                        onTogglePause = vm::toggleSetPause,
+                        onComplete = vm::completeSet
+                    )
                 }
 
                 CircuitPhase.REP_ENTRY -> {
@@ -218,6 +232,48 @@ fun CircuitScreen(onFinish: () -> Unit) {
             dismissButton = {
                 TextButton(onClick = { showFinishConfirm = false }) {
                     Text("Отмена")
+                }
+            }
+        )
+    }
+
+    if (showExitConfirm) {
+        AlertDialog(
+            onDismissRequest = { showExitConfirm = false },
+            title = { Text("Выйти из тренировки?") },
+            text = { Text("Записанные подходы сохранятся, и ты сможешь продолжить тренировку позже.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showExitConfirm = false
+                    vm.saveAndExit()
+                }) {
+                    Text("Выйти")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExitConfirm = false }) {
+                    Text("Отмена")
+                }
+            }
+        )
+    }
+
+    if (resumeGapSeconds != null && !showExitConfirm && !showFinishConfirm) {
+        val gapText = formatGap(resumeGapSeconds ?: 0L)
+        AlertDialog(
+            onDismissRequest = { },
+            title = { Text("Продолжить тренировку") },
+            text = {
+                Text("Ты отсутствовал $gapText. Считать это время отдыхом?")
+            },
+            confirmButton = {
+                TextButton(onClick = { vm.onResumeGapDecided(true) }) {
+                    Text("Да, отдых")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { vm.onResumeGapDecided(false) }) {
+                    Text("Нет")
                 }
             }
         )
@@ -398,74 +454,218 @@ private fun AddExerciseDropdown(
 @Composable
 private fun CircuitExerciseContent(
     circuitNumber: Int,
-    index: Int,
-    count: Int,
-    exercise: Exercise,
-    lastWeight: Double?,
+    exercises: List<Exercise>,
+    activeExercise: Exercise?,
+    roundCompletedIds: Set<Long>,
+    lastWeight: (Long) -> Double?,
     elapsedSeconds: Long,
     paused: Boolean,
     pauseElapsed: Long,
+    onSelectExercise: (Long) -> Unit,
+    onSelectNext: () -> Unit,
     onTogglePause: () -> Unit,
     onComplete: () -> Unit
 ) {
-    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val half = maxHeight * 0.5f
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(
+            "Круг $circuitNumber",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        val current = activeExercise
+        if (current != null) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    current.name,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                )
+                lastWeight(current.id)?.let {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Вес: ${weightLabel(it)} кг",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                CircuitBigTimer(
+                    label = if (paused) "Пауза · внеплановый отдых" else "Время подхода",
+                    value = formatTimer(if (paused) pauseElapsed else elapsedSeconds),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .clickable { onComplete() }
+                )
+                Text(
+                    "Нажми на таймер, чтобы завершить подход",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(12.dp))
+                Button(
+                    onClick = onTogglePause,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp)
+                ) {
+                    Text(if (paused) "Продолжить" else "Пауза", style = MaterialTheme.typography.titleMedium)
+                }
+            }
+
             Text(
-                "Круг $circuitNumber · Упражнение ${index + 1} из $count",
-                style = MaterialTheme.typography.titleMedium,
+                "Упражнения круга",
+                style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                exercise.name,
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center
-            )
-            if (lastWeight != null) {
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    if (circuitNumber <= 1) {
-                        "Вес: ${weightLabel(lastWeight)} кг"
-                    } else {
-                        "Вес прошлого круга: ${weightLabel(lastWeight)} кг"
-                    },
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.primary
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 260.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                ExerciseSelectRows(
+                    exercises = exercises,
+                    current = current,
+                    roundCompletedIds = roundCompletedIds,
+                    onSelectExercise = onSelectExercise
                 )
             }
-
-            CircuitBigTimer(
-                label = if (paused) "Пауза · внеплановый отдых" else "Время подхода",
-                value = formatTimer(if (paused) pauseElapsed else elapsedSeconds),
+        } else {
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = half)
                     .weight(1f)
-                    .clickable { onComplete() }
-            )
-
-            Text(
-                "Нажми на таймер, чтобы завершить подход",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(12.dp))
-
-            Button(
-                onClick = onTogglePause,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp)
             ) {
-                Text(if (paused) "Продолжить" else "Пауза", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Выбери следующее упражнение",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(12.dp))
+                Button(
+                    onClick = onSelectNext,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Text(
+                            "СЛЕДУЮЩЕЕ",
+                            style = MaterialTheme.typography.displayMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            "упражнение по списку",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "Упражнения круга",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                ExerciseSelectRows(
+                    exercises = exercises,
+                    current = null,
+                    roundCompletedIds = roundCompletedIds,
+                    onSelectExercise = onSelectExercise
+                )
             }
+        }
+    }
+}
+
+@Composable
+private fun ExerciseSelectRows(
+    exercises: List<Exercise>,
+    current: Exercise?,
+    roundCompletedIds: Set<Long>,
+    onSelectExercise: (Long) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        exercises.chunked(2).forEach { rowExercises ->
+            Row(modifier = Modifier.fillMaxWidth()) {
+                rowExercises.forEach { ex ->
+                    val done = roundCompletedIds.contains(ex.id)
+                    val active = current?.id == ex.id
+                    ExerciseSelectButton(
+                        exercise = ex,
+                        isActive = active,
+                        isDone = done,
+                        onClick = { onSelectExercise(ex.id) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ExerciseSelectButton(
+    exercise: Exercise,
+    isActive: Boolean,
+    isDone: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val background = when {
+        isActive -> MaterialTheme.colorScheme.primary
+        isDone -> DoneButtonBg
+        else -> LightGreenBg
+    }
+    val contentColor = when {
+        isActive -> MaterialTheme.colorScheme.onPrimary
+        isDone -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+        else -> MaterialTheme.colorScheme.onSurface
+    }
+    val borderColor = when {
+        isActive -> MaterialTheme.colorScheme.primary
+        isDone -> DoneButtonBorder
+        else -> AvailableButtonBorder
+    }
+    val borderWidth = if (isActive) 3.dp else 2.dp
+
+    Surface(
+        color = background,
+        contentColor = contentColor,
+        shape = RectangleShape,
+        border = BorderStroke(borderWidth, borderColor),
+        modifier = modifier
+            .fillMaxWidth()
+            .height(64.dp)
+            .clickable(enabled = !isActive && !isDone, onClick = onClick)
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                exercise.name,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 12.dp)
+            )
         }
     }
 }

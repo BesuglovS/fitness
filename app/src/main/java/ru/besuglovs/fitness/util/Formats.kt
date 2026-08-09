@@ -31,6 +31,13 @@ fun formatTimer(seconds: Long): String {
     return "%d:%02d".format(m, s)
 }
 
+fun formatGap(seconds: Long): String {
+    if (seconds < 60) return "$seconds сек"
+    val h = seconds / 3600
+    val m = (seconds % 3600) / 60
+    return if (h > 0) "${h} ч ${m} мин" else "${m} мин"
+}
+
 fun weightLabel(w: Double?): String =
     if (w == null) "-" else if (w % 1.0 == 0.0) w.toInt().toString() else w.toString()
 
