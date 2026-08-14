@@ -30,6 +30,12 @@ import java.util.UUID
 
 enum class HeartRateStatus { DISCONNECTED, SCANNING, CONNECTING, CONNECTED }
 
+data class ScannedDevice(
+    val address: String,
+    val name: String?,
+    val rssi: Int
+)
+
 /**
  * Клиент BLE-пульсометра H808S (COOSPO). Использует стандартный сервис
  * Heart Rate (0x180D) и характеристику Heart Rate Measurement (0x2A37).
@@ -55,6 +61,15 @@ class HeartRateSensor(context: Context) {
     private val _readings = MutableSharedFlow<Int>(extraBufferCapacity = 64)
     val readings: SharedFlow<Int> = _readings.asSharedFlow()
 
+    private val _discoveredDevices = MutableStateFlow<List<ScannedDevice>>(emptyList())
+    val discoveredDevices: StateFlow<List<ScannedDevice>> = _discoveredDevices.asStateFlow()
+
+    @Volatile
+    private var autoReconnectInProgress = false
+
+    @Volatile
+    private var wasConnected = false
+
     private var gatt: BluetoothGatt? = null
     private var scanCallback: ScanCallback? = null
     private var timeoutRunnable: Runnable? = null
@@ -71,23 +86,52 @@ class HeartRateSensor(context: Context) {
         if (savedMac != null) {
             val device = runCatching { adapter.getRemoteDevice(savedMac) }.getOrNull()
             if (device != null) {
+                autoReconnectInProgress = true
                 connectToDevice(device)
                 return@withContext true
             }
         }
-        startScan()
+        scanForDevices()
         true
+    }
+
+    suspend fun connect(address: String): Boolean = withContext(Dispatchers.IO) {
+        if (adapter == null || !adapter.isEnabled) return@withContext false
+        if (!hasRequiredPermissions()) return@withContext false
+        val device = runCatching { adapter.getRemoteDevice(address) }.getOrNull()
+        if (device == null) return@withContext false
+        prefs.edit().putString(KEY_LAST_MAC, address).apply()
+        connectToDevice(device)
+        true
+    }
+
+    fun scanForDevices() {
+        _discoveredDevices.value = emptyList()
+        startScan()
+    }
+
+    fun cancelScan() {
+        stopScan()
+        _status.value = HeartRateStatus.DISCONNECTED
+        _discoveredDevices.value = emptyList()
+    }
+
+    fun forgetLastDevice() {
+        prefs.edit().remove(KEY_LAST_MAC).apply()
     }
 
     fun disconnect() {
         timeoutRunnable?.let { mainHandler.removeCallbacks(it) }
         stopScan()
+        autoReconnectInProgress = false
+        wasConnected = false
         gatt?.disconnect()
         gatt?.close()
         gatt = null
         _status.value = HeartRateStatus.DISCONNECTED
         _bpm.value = null
         _deviceName.value = null
+        _discoveredDevices.value = emptyList()
     }
 
     private fun hasRequiredPermissions(): Boolean {
@@ -115,10 +159,15 @@ class HeartRateSensor(context: Context) {
                 val name = result.scanRecord?.deviceName ?: device.name
                 val isTarget = name?.contains("h808", ignoreCase = true) == true ||
                     result.scanRecord?.serviceUuids?.any { it.uuid == HEART_RATE_SERVICE_UUID } == true
-                if (isTarget) {
-                    prefs.edit().putString(KEY_LAST_MAC, device.address).apply()
-                    stopScan()
-                    connectToDevice(device)
+                if (!isTarget) return
+                val address = device.address
+                val current = _discoveredDevices.value
+                if (current.none { it.address == address }) {
+                    _discoveredDevices.value = current + ScannedDevice(
+                        address = address,
+                        name = name,
+                        rssi = result.rssi
+                    )
                 }
             }
 
@@ -130,7 +179,6 @@ class HeartRateSensor(context: Context) {
         scanner.startScan(callback)
         timeoutRunnable = Runnable {
             stopScan()
-            _status.value = HeartRateStatus.DISCONNECTED
         }.also { mainHandler.postDelayed(it, SCAN_TIMEOUT_MS) }
     }
 
@@ -142,6 +190,7 @@ class HeartRateSensor(context: Context) {
     }
 
     private fun connectToDevice(device: BluetoothDevice) {
+        wasConnected = false
         _status.value = HeartRateStatus.CONNECTING
         _deviceName.value = device.name ?: "H808S"
         gatt?.disconnect()
@@ -152,12 +201,24 @@ class HeartRateSensor(context: Context) {
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             when (newState) {
-                BluetoothProfile.STATE_CONNECTED -> gatt.discoverServices()
+                BluetoothProfile.STATE_CONNECTED -> {
+                    wasConnected = true
+                    autoReconnectInProgress = false
+                    gatt.discoverServices()
+                }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     this@HeartRateSensor.gatt?.close()
                     this@HeartRateSensor.gatt = null
-                    _status.value = HeartRateStatus.DISCONNECTED
+                    val failedReconnect = autoReconnectInProgress && !wasConnected
+                    autoReconnectInProgress = false
+                    wasConnected = false
                     _bpm.value = null
+                    if (failedReconnect) {
+                        prefs.edit().remove(KEY_LAST_MAC).apply()
+                        startScan()
+                    } else {
+                        _status.value = HeartRateStatus.DISCONNECTED
+                    }
                 }
             }
         }

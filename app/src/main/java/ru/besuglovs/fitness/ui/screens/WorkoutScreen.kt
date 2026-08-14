@@ -105,6 +105,7 @@ fun WorkoutScreen(onFinish: () -> Unit, onExit: () -> Unit) {
     val heartRateStatus by vm.heartRateStatus.collectAsStateWithLifecycle()
     val heartRateDeviceName by vm.heartRateDeviceName.collectAsStateWithLifecycle()
     val heartRateRecorded by vm.heartRateRecorded.collectAsStateWithLifecycle()
+    val heartRateDevices by vm.heartRateDevices.collectAsStateWithLifecycle()
 
     var showFinishConfirm by remember { mutableStateOf(false) }
     var showExitConfirm by remember { mutableStateOf(false) }
@@ -164,8 +165,12 @@ fun WorkoutScreen(onFinish: () -> Unit, onExit: () -> Unit) {
                 status = heartRateStatus,
                 deviceName = heartRateDeviceName,
                 recordedCount = heartRateRecorded,
+                devices = heartRateDevices,
                 onConnect = vm::connectHeartRate,
                 onDisconnect = vm::disconnectHeartRate,
+                onSelectDevice = vm::selectHeartRateDevice,
+                onScanAgain = vm::scanHeartRateDevices,
+                onForget = vm::forgetHeartRateDevice,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp)

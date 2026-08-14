@@ -14,6 +14,7 @@ import org.json.JSONObject
 import ru.besuglovs.fitness.FitnessApp
 import ru.besuglovs.fitness.ble.HeartRateSensor
 import ru.besuglovs.fitness.ble.HeartRateStatus
+import ru.besuglovs.fitness.ble.ScannedDevice
 import ru.besuglovs.fitness.data.Exercise
 import ru.besuglovs.fitness.data.ExerciseWithSets
 import ru.besuglovs.fitness.data.FitnessRepository
@@ -130,6 +131,9 @@ class CircuitViewModel(
     private val _heartRateRecorded = MutableStateFlow(0)
     val heartRateRecorded: StateFlow<Int> = _heartRateRecorded.asStateFlow()
 
+    private val _heartRateDevices = MutableStateFlow<List<ScannedDevice>>(emptyList())
+    val heartRateDevices: StateFlow<List<ScannedDevice>> = _heartRateDevices.asStateFlow()
+
     private val heartRateSamples = mutableListOf<HeartRateSample>()
     private var heartRateSavedCount = 0
 
@@ -167,6 +171,9 @@ class CircuitViewModel(
             heartRateSensor.deviceName.collect { _heartRateDeviceName.value = it }
         }
         viewModelScope.launch {
+            heartRateSensor.discoveredDevices.collect { _heartRateDevices.value = it }
+        }
+        viewModelScope.launch {
             heartRateSensor.readings.collect { bpm ->
                 heartRateSamples.add(
                     HeartRateSample(
@@ -202,6 +209,19 @@ class CircuitViewModel(
 
     fun disconnectHeartRate() {
         heartRateSensor.disconnect()
+    }
+
+    fun selectHeartRateDevice(device: ScannedDevice) {
+        viewModelScope.launch { heartRateSensor.connect(device.address) }
+    }
+
+    fun scanHeartRateDevices() {
+        heartRateSensor.disconnect()
+        heartRateSensor.scanForDevices()
+    }
+
+    fun forgetHeartRateDevice() {
+        heartRateSensor.forgetLastDevice()
     }
 
     override fun onCleared() {
