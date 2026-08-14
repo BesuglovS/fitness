@@ -22,6 +22,8 @@ object ExportUtils {
             try {
                 val exercises = repository.allExercisesOnce()
                 val workoutDetails = repository.allWorkoutDetailsOnce()
+                val heartRateSamples = repository.allHeartRateSamplesOnce()
+                    .groupBy { it.workoutId }
 
                 val root = JSONObject()
                 root.put("app", "Фитнес-дневник")
@@ -58,13 +60,26 @@ object ExportUtils {
                                     put("set", s.setNumber)
                                     put("weightKg", s.weightKg)
                                     put("reps", s.reps)
+                                    if (s.durationSeconds != null) put("durationSeconds", s.durationSeconds)
                                     put("restSeconds", s.restSeconds)
+                                    if (s.setStartTime != null) put("setStartTime", s.setStartTime)
+                                    if (s.doneAt > 0L) put("doneAt", s.doneAt)
+                                    if (s.avgHeartRate != null) put("avgHeartRate", s.avgHeartRate)
+                                    if (s.maxHeartRate != null) put("maxHeartRate", s.maxHeartRate)
                                 })
                             }
                             put("sets", setsArr)
                         })
                     }
                     wobj.put("exercises", exes)
+                    val hrArr = JSONArray()
+                    for (s in heartRateSamples[wo.id].orEmpty()) {
+                        hrArr.put(JSONObject().apply {
+                            put("timestamp", s.timestamp)
+                            put("bpm", s.bpm)
+                        })
+                    }
+                    wobj.put("heartRate", hrArr)
                     woArray.put(wobj)
                 }
                 root.put("workouts", woArray)

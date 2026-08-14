@@ -1,5 +1,6 @@
 package ru.besuglovs.fitness.ui.screens
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,6 +15,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -28,6 +30,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -38,9 +41,11 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import ru.besuglovs.fitness.data.SetEntry
+import ru.besuglovs.fitness.data.HeartRateSample
 import ru.besuglovs.fitness.data.WorkoutWithDetails
 import ru.besuglovs.fitness.data.WorkoutExerciseWithExercise
 import ru.besuglovs.fitness.ui.AppViewModelProvider
+import ru.besuglovs.fitness.ui.components.LineChart
 import ru.besuglovs.fitness.ui.viewmodel.WorkoutDetailViewModel
 import ru.besuglovs.fitness.util.formatDateTime
 import ru.besuglovs.fitness.util.formatDuration
@@ -55,6 +60,7 @@ fun WorkoutDetailScreen(workoutId: Long, onBack: () -> Unit) {
         factory = AppViewModelProvider.Factory
     )
     val details by vm.details.collectAsStateWithLifecycle()
+    val heartRateSamples by vm.heartRateSamples.collectAsStateWithLifecycle()
 
     Scaffold(
         topBar = {
@@ -83,11 +89,15 @@ fun WorkoutDetailScreen(workoutId: Long, onBack: () -> Unit) {
         val totalVolume = details!!.exercises.sumOf { we ->
             we.sets.sumOf { (it.weightKg ?: 0.0) * (it.reps ?: 0) }
         }
+        val crossRestKeys = remember(details!!.exercises) {
+            computeCrossExerciseRests(details!!.exercises)
+        }
 
         if (workout.isCircuit) {
             CircuitDetailList(
                 details = details!!,
                 totalVolume = totalVolume,
+                heartRateSamples = heartRateSamples,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
@@ -106,9 +116,21 @@ fun WorkoutDetailScreen(workoutId: Long, onBack: () -> Unit) {
                 WorkoutDetailHeader(workout, totalVolume)
             }
 
+            item {
+                HeartRateDetailCard(heartRateSamples)
+            }
+
             details!!.exercises.forEach { we ->
                 item {
-                    ExerciseDetailCard(we)
+                    ExerciseDetailCard(we, crossRestKeys, heartRateSamples)
+                }
+                val crossRest = we.sets.firstOrNull {
+                    SetRestKey(we.workoutExercise.id, it.setNumber) in crossRestKeys
+                }
+                if (crossRest != null) {
+                    item {
+                        CrossExerciseRestBlock(restSeconds = crossRest.restSeconds)
+                    }
                 }
             }
         }
@@ -135,12 +157,118 @@ private fun WorkoutDetailHeader(
     }
 }
 
+@Composable
+private fun HeartRateDetailCard(samples: List<HeartRateSample>) {
+    if (samples.isEmpty()) return
+    val (values, labels) = remember(samples) { downsampleHeartRate(samples) }
+    val min = samples.minOf { it.bpm }
+    val max = samples.maxOf { it.bpm }
+    val avg = samples.map { it.bpm }.average().toInt()
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Text(
+                "Частота сердечных сокращений",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                "Средняя $avg · Мин $min · Макс $max уд/мин",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(8.dp))
+            LineChart(values = values, xLabels = labels)
+        }
+    }
+}
+
+private fun downsampleHeartRate(
+    samples: List<HeartRateSample>,
+    maxPoints: Int = 30
+): Pair<List<Float>, List<String>> {
+    if (samples.isEmpty()) return emptyList<Float>() to emptyList()
+    val first = samples.first().timestamp
+    val step = kotlin.math.ceil(samples.size.toDouble() / maxPoints).toInt().coerceAtLeast(1)
+    val indices = samples.indices step step
+    val values = indices.map { samples[it].bpm.toFloat() }
+    val labels = indices.map {
+        val m = (samples[it].timestamp - first) / 60000
+        "${m}м"
+    }
+    return values to labels
+}
+
+private fun samplesForSet(
+    samples: List<HeartRateSample>,
+    set: SetEntry
+): List<HeartRateSample> {
+    val start = set.setStartTime ?: return emptyList()
+    val end = set.doneAt
+    if (end < start) return emptyList()
+    return samples.filter { it.timestamp in start..end }
+}
+
+private fun samplesForCircle(
+    samples: List<HeartRateSample>,
+    circleSets: List<SetEntry>
+): List<HeartRateSample> {
+    val starts = circleSets.mapNotNull { it.setStartTime }
+    if (starts.isEmpty()) return emptyList()
+    val start = starts.minOrNull() ?: return emptyList()
+    val end = circleSets.maxOf { it.doneAt }
+    if (end < start) return emptyList()
+    return samples.filter { it.timestamp in start..end }
+}
+
+private fun heartRateLabel(set: SetEntry): String =
+    if (set.avgHeartRate != null || set.maxHeartRate != null) {
+        "${set.avgHeartRate ?: "-"}/${set.maxHeartRate ?: "-"}"
+    } else {
+        "-"
+    }
+
+@Composable
+private fun HeartRateSection(
+    label: String,
+    samples: List<HeartRateSample>,
+    modifier: Modifier = Modifier
+) {
+    if (samples.isEmpty()) {
+        Text(
+            "Нет данных о пульсе",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = modifier
+        )
+        return
+    }
+    val (values, labels) = remember(samples) { downsampleHeartRate(samples) }
+    val min = samples.minOf { it.bpm }
+    val max = samples.maxOf { it.bpm }
+    val avg = samples.map { it.bpm }.average().toInt()
+    Column(modifier = modifier.fillMaxWidth()) {
+        Text(
+            "$label · ср $avg · мин $min · макс $max уд/мин",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Spacer(Modifier.height(4.dp))
+        LineChart(values = values, xLabels = labels)
+    }
+}
+
 private enum class CircuitViewMode { BY_CIRCLE, BY_EXERCISE }
 
 @Composable
 private fun CircuitDetailList(
     details: WorkoutWithDetails,
     totalVolume: Double,
+    heartRateSamples: List<HeartRateSample>,
     modifier: Modifier = Modifier
 ) {
     val exercises = details.exercises.sortedBy { it.workoutExercise.orderIndex }
@@ -154,6 +282,9 @@ private fun CircuitDetailList(
     ) {
         item {
             WorkoutDetailHeader(details.workout, totalVolume)
+        }
+        item {
+            HeartRateDetailCard(heartRateSamples)
         }
         item {
             Text(
@@ -172,13 +303,13 @@ private fun CircuitDetailList(
         if (mode == CircuitViewMode.BY_CIRCLE) {
             for (circle in 1..maxCircles) {
                 item {
-                    CircuitCircleCard(circleNumber = circle, exercises = exercises)
+                    CircuitCircleCard(circleNumber = circle, exercises = exercises, heartRateSamples = heartRateSamples)
                 }
             }
         } else {
             exercises.forEach { we ->
                 item {
-                    CircuitExerciseCard(we = we)
+                    CircuitExerciseCard(we = we, heartRateSamples = heartRateSamples)
                 }
             }
         }
@@ -210,8 +341,10 @@ private fun CircuitViewModeToggle(
 
 @Composable
 private fun CircuitExerciseCard(
-    we: WorkoutExerciseWithExercise
+    we: WorkoutExerciseWithExercise,
+    heartRateSamples: List<HeartRateSample>
 ) {
+    var expandedKey by rememberSaveable { mutableStateOf<String?>(null) }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
@@ -247,7 +380,19 @@ private fun CircuitExerciseCard(
                     modifier = Modifier.weight(1f)
                 )
                 Text(
+                    "Пульс ср/макс",
+                    style = MaterialTheme.typography.labelMedium,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
                     "Время",
+                    style = MaterialTheme.typography.labelMedium,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    "Отдых",
                     style = MaterialTheme.typography.labelMedium,
                     textAlign = TextAlign.End,
                     modifier = Modifier.weight(1f)
@@ -256,7 +401,14 @@ private fun CircuitExerciseCard(
             HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
             we.sets.sortedBy { it.setNumber }.forEach { set ->
-                CircuitExerciseCardRow(circleNumber = set.setNumber, set = set)
+                val key = "cset_${we.workoutExercise.id}_${set.setNumber}"
+                CircuitExerciseCardRow(
+                    circleNumber = set.setNumber,
+                    set = set,
+                    heartRateSamples = heartRateSamples,
+                    expanded = expandedKey == key,
+                    onToggle = { expandedKey = if (expandedKey == key) null else key }
+                )
             }
         }
     }
@@ -265,52 +417,81 @@ private fun CircuitExerciseCard(
 @Composable
 private fun CircuitExerciseCardRow(
     circleNumber: Int,
-    set: SetEntry
+    set: SetEntry,
+    heartRateSamples: List<HeartRateSample>,
+    expanded: Boolean,
+    onToggle: () -> Unit
 ) {
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .clickable { onToggle() }
+            .padding(vertical = 6.dp)
     ) {
-        Text(
-            circleNumber.toString(),
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.weight(1f)
-        )
-        Text(
-            weightLabel(set.weightKg),
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.weight(1f),
-            textAlign = TextAlign.End
-        )
-        Text(
-            set.reps?.toString() ?: "-",
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.weight(1f),
-            textAlign = TextAlign.End
-        )
-        Text(
-            set.durationSeconds?.let { formatTimer(it.toLong()) } ?: "-",
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.weight(1f),
-            textAlign = TextAlign.End
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                circleNumber.toString(),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                weightLabel(set.weightKg),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.End
+            )
+            Text(
+                set.reps?.toString() ?: "-",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.End
+            )
+            Text(
+                heartRateLabel(set),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.End
+            )
+            Text(
+                set.durationSeconds?.let { formatTimer(it.toLong()) } ?: "-",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.End
+            )
+            Text(
+                set.restSeconds?.let { "${it / 60}:${"%02d".format(it % 60)}" } ?: "-",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.End
+            )
+        }
+        if (expanded) {
+            Spacer(Modifier.height(6.dp))
+            HeartRateSection(
+                label = "Пульс подхода $circleNumber",
+                samples = samplesForSet(heartRateSamples, set)
+            )
+        }
     }
 }
 
 @Composable
 private fun CircuitCircleCard(
     circleNumber: Int,
-    exercises: List<WorkoutExerciseWithExercise>
+    exercises: List<WorkoutExerciseWithExercise>,
+    heartRateSamples: List<HeartRateSample>
 ) {
-    val restSeconds = exercises.firstNotNullOfOrNull { we ->
-        we.sets.firstOrNull { it.setNumber == circleNumber }?.restSeconds
-    }
+    var circleExpanded by rememberSaveable { mutableStateOf(false) }
+    var expandedKey by rememberSaveable { mutableStateOf<String?>(null) }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { circleExpanded = !circleExpanded },
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
@@ -320,13 +501,18 @@ private fun CircuitCircleCard(
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.weight(1f)
                 )
-                if (restSeconds != null) {
-                    Text(
-                        "Отдых: ${formatTimer(restSeconds.toLong())}",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+            }
+            if (circleExpanded) {
+                Spacer(Modifier.height(8.dp))
+                HeartRateSection(
+                    label = "Пульс круга $circleNumber",
+                    samples = samplesForCircle(
+                        heartRateSamples,
+                        exercises.mapNotNull { we ->
+                            we.sets.firstOrNull { it.setNumber == circleNumber }
+                        }
                     )
-                }
+                )
             }
             Spacer(Modifier.height(8.dp))
 
@@ -349,7 +535,19 @@ private fun CircuitCircleCard(
                     modifier = Modifier.weight(1f)
                 )
                 Text(
+                    "Пульс ср/макс",
+                    style = MaterialTheme.typography.labelMedium,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
                     "Время",
+                    style = MaterialTheme.typography.labelMedium,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    "Отдых",
                     style = MaterialTheme.typography.labelMedium,
                     textAlign = TextAlign.End,
                     modifier = Modifier.weight(1f)
@@ -364,7 +562,14 @@ private fun CircuitCircleCard(
                 }
                 .sortedBy { (_, set) -> set.doneAt }
                 .forEach { (we, set) ->
-                    CircuitExerciseRow(we = we, set = set)
+                    val key = "rset_${we.workoutExercise.id}_${set.setNumber}"
+                    CircuitExerciseRow(
+                        we = we,
+                        set = set,
+                        heartRateSamples = heartRateSamples,
+                        expanded = expandedKey == key,
+                        onToggle = { expandedKey = if (expandedKey == key) null else key }
+                    )
                 }
         }
     }
@@ -373,37 +578,64 @@ private fun CircuitCircleCard(
 @Composable
 private fun CircuitExerciseRow(
     we: WorkoutExerciseWithExercise,
-    set: SetEntry
+    set: SetEntry,
+    heartRateSamples: List<HeartRateSample>,
+    expanded: Boolean,
+    onToggle: () -> Unit
 ) {
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .clickable { onToggle() }
+            .padding(vertical = 6.dp)
     ) {
-        Text(
-            we.exerciseName,
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.weight(1f)
-        )
-        Text(
-            weightLabel(set.weightKg),
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.weight(1f),
-            textAlign = TextAlign.End
-        )
-        Text(
-            set.reps?.toString() ?: "-",
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.weight(1f),
-            textAlign = TextAlign.End
-        )
-        Text(
-            set.durationSeconds?.let { formatTimer(it.toLong()) } ?: "-",
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.weight(1f),
-            textAlign = TextAlign.End
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                we.exerciseName,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                weightLabel(set.weightKg),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.End
+            )
+            Text(
+                set.reps?.toString() ?: "-",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.End
+            )
+            Text(
+                heartRateLabel(set),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.End
+            )
+            Text(
+                set.durationSeconds?.let { formatTimer(it.toLong()) } ?: "-",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.End
+            )
+            Text(
+                set.restSeconds?.let { "${it / 60}:${"%02d".format(it % 60)}" } ?: "-",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.End
+            )
+        }
+        if (expanded) {
+            Spacer(Modifier.height(6.dp))
+            HeartRateSection(
+                label = "Пульс подхода ${set.setNumber}",
+                samples = samplesForSet(heartRateSamples, set)
+            )
+        }
     }
 }
 
@@ -420,7 +652,80 @@ private fun pluralExercises(count: Int): String = when (count) {
 }
 
 @Composable
-private fun ExerciseDetailCard(we: ru.besuglovs.fitness.data.WorkoutExerciseWithExercise) {
+private fun CrossExerciseRestBlock(restSeconds: Int?) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Отдых между упражнениями",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                restSeconds?.let { "${it / 60}:${"%02d".format(it % 60)}" } ?: "-",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+    }
+}
+
+private data class SetRestKey(
+    val workoutExerciseId: Long,
+    val setNumber: Int
+)
+
+private fun computeCrossExerciseRests(
+    exercises: List<WorkoutExerciseWithExercise>
+): Set<SetRestKey> {
+    val pairs = exercises.flatMap { we ->
+        we.sets.map { set -> we to set }
+    }
+    if (pairs.isEmpty()) return emptySet()
+
+    // Новые тренировки записывают doneAt в момент завершения подхода — времена
+    // достоверно различаются. Старые сохраняли одно время на все подходы.
+    val hasReliableTimes = (pairs.maxOfOrNull { it.second.doneAt } ?: 0L) -
+        (pairs.minOfOrNull { it.second.doneAt } ?: 0L) >= 1000
+
+    val ordered = if (hasReliableTimes) {
+        pairs.sortedBy { it.second.doneAt }
+    } else {
+        pairs.sortedWith(
+            compareBy<Pair<WorkoutExerciseWithExercise, SetEntry>> { it.first.workoutExercise.orderIndex }
+                .thenBy { it.second.setNumber }
+        )
+    }
+
+    val result = mutableSetOf<SetRestKey>()
+    for (i in 0 until ordered.size - 1) {
+        val current = ordered[i]
+        val next = ordered[i + 1]
+        if (current.first.workoutExercise.id != next.first.workoutExercise.id) {
+            result.add(SetRestKey(current.first.workoutExercise.id, current.second.setNumber))
+        }
+    }
+    return result
+}
+
+@Composable
+private fun ExerciseDetailCard(
+    we: ru.besuglovs.fitness.data.WorkoutExerciseWithExercise,
+    crossRestKeys: Set<SetRestKey>,
+    heartRateSamples: List<HeartRateSample>
+) {
+    var expandedKey by rememberSaveable { mutableStateOf<String?>(null) }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(we.exerciseName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
@@ -438,31 +743,67 @@ private fun ExerciseDetailCard(we: ru.besuglovs.fitness.data.WorkoutExerciseWith
                 Text("№", style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(30.dp))
                 Text("Вес", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
                 Text("Повт", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                Text("Пульс ср/макс", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                Text("Время", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
                 Text("Отдых", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
             }
             HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
             we.sets.sortedBy { it.setNumber }.forEach { set ->
-                SetDetailRow(set)
+                val isCrossRest = SetRestKey(we.workoutExercise.id, set.setNumber) in crossRestKeys
+                val key = "set_${we.workoutExercise.id}_${set.setNumber}"
+                SetDetailRow(
+                    set = set,
+                    isCrossRest = isCrossRest,
+                    heartRateSamples = heartRateSamples,
+                    expanded = expandedKey == key,
+                    onToggle = { expandedKey = if (expandedKey == key) null else key }
+                )
             }
         }
     }
 }
 
 @Composable
-private fun SetDetailRow(set: SetEntry) {
-    Row(
+private fun SetDetailRow(
+    set: SetEntry,
+    isCrossRest: Boolean,
+    heartRateSamples: List<HeartRateSample>,
+    expanded: Boolean,
+    onToggle: () -> Unit
+) {
+    Column(
         modifier = Modifier
             .fillMaxWidth()
+            .clickable { onToggle() }
             .padding(vertical = 4.dp)
     ) {
-        Text(set.setNumber.toString(), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(30.dp))
-        Text(weightLabel(set.weightKg), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-        Text(set.reps?.toString() ?: "-", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-        Text(
-            set.restSeconds?.let { "${it / 60}:${"%02d".format(it % 60)}" } ?: "-",
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.weight(1f)
-        )
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Text(set.setNumber.toString(), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(30.dp))
+            Text(weightLabel(set.weightKg), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Text(set.reps?.toString() ?: "-", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Text(
+                heartRateLabel(set),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                set.durationSeconds?.let { formatTimer(it.toLong()) } ?: "-",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                if (isCrossRest) "-" else (set.restSeconds?.let { "${it / 60}:${"%02d".format(it % 60)}" } ?: "-"),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        if (expanded) {
+            Spacer(Modifier.height(6.dp))
+            HeartRateSection(
+                label = "Пульс подхода ${set.setNumber}",
+                samples = samplesForSet(heartRateSamples, set)
+            )
+        }
     }
 }

@@ -12,9 +12,12 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import ru.besuglovs.fitness.FitnessApp
+import ru.besuglovs.fitness.ble.HeartRateSensor
+import ru.besuglovs.fitness.ble.HeartRateStatus
 import ru.besuglovs.fitness.data.Exercise
 import ru.besuglovs.fitness.data.ExerciseWithSets
 import ru.besuglovs.fitness.data.FitnessRepository
+import ru.besuglovs.fitness.data.HeartRateSample
 import ru.besuglovs.fitness.data.SetEntry
 import ru.besuglovs.fitness.data.decodeDoubleMap
 import ru.besuglovs.fitness.data.decodeIntListMap
@@ -32,7 +35,11 @@ data class WorkoutRecordedSet(
     val weight: Double,
     val reps: Int,
     val durationSeconds: Int = 0,
-    val restSeconds: Int? = null
+    val restSeconds: Int? = null,
+    val doneAt: Long? = null,
+    val startTime: Long? = null,
+    val avgHeartRate: Int? = null,
+    val maxHeartRate: Int? = null
 )
 
 class WorkoutViewModel(
@@ -101,6 +108,23 @@ class WorkoutViewModel(
     private val _resumeGapSeconds = MutableStateFlow<Long?>(null)
     val resumeGapSeconds: StateFlow<Long?> = _resumeGapSeconds.asStateFlow()
 
+    private val heartRateSensor = HeartRateSensor(getApplication())
+
+    private val _heartRateBpm = MutableStateFlow<Int?>(null)
+    val heartRateBpm: StateFlow<Int?> = _heartRateBpm.asStateFlow()
+
+    private val _heartRateStatus = MutableStateFlow(HeartRateStatus.DISCONNECTED)
+    val heartRateStatus: StateFlow<HeartRateStatus> = _heartRateStatus.asStateFlow()
+
+    private val _heartRateDeviceName = MutableStateFlow<String?>(null)
+    val heartRateDeviceName: StateFlow<String?> = _heartRateDeviceName.asStateFlow()
+
+    private val _heartRateRecorded = MutableStateFlow(0)
+    val heartRateRecorded: StateFlow<Int> = _heartRateRecorded.asStateFlow()
+
+    private val heartRateSamples = mutableListOf<HeartRateSample>()
+    private var heartRateSavedCount = 0
+
     private var setJob: Job? = null
     private var restJob: Job? = null
     private var setRunningSeconds = 0L
@@ -108,10 +132,41 @@ class WorkoutViewModel(
 
     private val _setDurations = mutableMapOf<Long, MutableList<Int>>()
     private val _durationIndex = mutableMapOf<Long, Int>()
+    private var _pendingDoneAt = 0L
+    private var pendingSetStart = 0L
+    private var pendingSetAvgHr: Int? = null
+    private var pendingSetMaxHr: Int? = null
 
     init {
         viewModelScope.launch {
             repository.exercises().collect { _allExercises.value = it }
+        }
+        viewModelScope.launch {
+            heartRateSensor.bpm.collect { _heartRateBpm.value = it }
+        }
+        viewModelScope.launch {
+            heartRateSensor.status.collect { _heartRateStatus.value = it }
+        }
+        viewModelScope.launch {
+            heartRateSensor.deviceName.collect { _heartRateDeviceName.value = it }
+        }
+        viewModelScope.launch {
+            heartRateSensor.readings.collect { bpm ->
+                heartRateSamples.add(
+                    HeartRateSample(
+                        workoutId = workoutId,
+                        timestamp = System.currentTimeMillis(),
+                        bpm = bpm
+                    )
+                )
+                _heartRateRecorded.value = heartRateSamples.size
+            }
+        }
+        viewModelScope.launch {
+            val existing = repository.heartRateSamplesOnce(workoutId)
+            heartRateSamples.addAll(existing)
+            heartRateSavedCount = heartRateSamples.size
+            _heartRateRecorded.value = heartRateSamples.size
         }
         viewModelScope.launch {
             val workout = repository.getWorkoutOnce(workoutId)
@@ -125,6 +180,19 @@ class WorkoutViewModel(
                 }
             }
         }
+    }
+
+    fun connectHeartRate() {
+        viewModelScope.launch { heartRateSensor.connect() }
+    }
+
+    fun disconnectHeartRate() {
+        heartRateSensor.disconnect()
+    }
+
+    override fun onCleared() {
+        heartRateSensor.disconnect()
+        super.onCleared()
     }
 
     private fun startResumedTimers() {
@@ -186,11 +254,19 @@ class WorkoutViewModel(
 
     fun startTraining() {
         val exercise = _currentExercise.value ?: return
-        if (_setupWeights.value[exercise.id]?.replace(',', '.')?.toDoubleOrNull()?.takeIf { it >= 0 } == null) return
-        val weight = _setupWeights.value[exercise.id]!!.replace(',', '.').toDouble()
+        val weight = _setupWeights.value[exercise.id]?.replace(',', '.')?.toDoubleOrNull() ?: 0.0
+        if (weight < 0) return
         _lastWeights.value = _lastWeights.value + (exercise.id to weight)
+        beginNewSet()
         _phase.value = WorkoutPhase.EXERCISE
         startSetTimer()
+    }
+
+    private fun beginNewSet() {
+        _pendingDoneAt = 0L
+        pendingSetStart = System.currentTimeMillis()
+        pendingSetAvgHr = null
+        pendingSetMaxHr = null
     }
 
     fun completeSet() {
@@ -198,6 +274,10 @@ class WorkoutViewModel(
         stopTimers()
         val exId = exercise.id
         _setDurations.getOrPut(exId) { mutableListOf() }.add(_setElapsed.value.toInt())
+        _pendingDoneAt = System.currentTimeMillis()
+        val (avg, max) = computeSetHrStats(pendingSetStart, _pendingDoneAt)
+        pendingSetAvgHr = avg
+        pendingSetMaxHr = max
         val pause = _pauseElapsed.value.toInt()
         if (pause > 0) {
             lastCommittedSet?.let { (prevExId, prevIndex) ->
@@ -227,13 +307,14 @@ class WorkoutViewModel(
         restJob?.cancel()
         commitEntrySet(exId, rest)
         val exercise = _currentExercise.value ?: return
+        beginNewSet()
         _phase.value = WorkoutPhase.EXERCISE
         startSetTimer()
     }
 
     fun isEntrySetValid(): Boolean {
-        val w = _entryWeight.value.replace(',', '.').toDoubleOrNull() ?: return false
-        val r = _entryReps.value.toIntOrNull() ?: return false
+        val w = entryWeightValue()
+        val r = entryRepsValue()
         return w >= 0 && r > 0
     }
 
@@ -251,18 +332,43 @@ class WorkoutViewModel(
     }
 
     private fun commitEntrySet(exId: Long, restSeconds: Int? = null) {
-        val w = _entryWeight.value.replace(',', '.').toDoubleOrNull() ?: return
-        val r = _entryReps.value.toIntOrNull() ?: return
+        val w = entryWeightValue()
+        val r = entryRepsValue()
         if (w < 0 || r <= 0) return
         val durationIdx = _durationIndex[exId] ?: 0
         val duration = _setDurations[exId]?.getOrNull(durationIdx) ?: 0
         _durationIndex[exId] = durationIdx + 1
+        val doneAt = _pendingDoneAt.takeIf { it > 0 }
+        val startTime = pendingSetStart.takeIf { it > 0 }
+        _pendingDoneAt = 0L
         val list = _completedSets.value[exId].orEmpty()
         _completedSets.value = _completedSets.value + (exId to (list +
-            WorkoutRecordedSet(w, r, durationSeconds = duration, restSeconds = restSeconds)))
+            WorkoutRecordedSet(
+                w,
+                r,
+                durationSeconds = duration,
+                restSeconds = restSeconds,
+                doneAt = doneAt,
+                startTime = startTime,
+                avgHeartRate = pendingSetAvgHr,
+                maxHeartRate = pendingSetMaxHr
+            )))
         lastCommittedSet = exId to list.size
         _lastWeights.value = _lastWeights.value + (exId to w)
     }
+
+    private fun computeSetHrStats(start: Long, end: Long): Pair<Int?, Int?> {
+        if (start <= 0 || end <= start) return null to null
+        val samples = heartRateSamples.filter { it.timestamp in start..end }
+        if (samples.isEmpty()) return null to null
+        return samples.map { it.bpm }.average().toInt() to samples.maxOf { it.bpm }
+    }
+
+    private fun entryWeightValue(): Double =
+        _entryWeight.value.replace(',', '.').toDoubleOrNull() ?: 0.0
+
+    private fun entryRepsValue(): Int =
+        _entryReps.value.toIntOrNull() ?: 10
 
     fun toggleRestPause() {
         if (_phase.value != WorkoutPhase.REST) return
@@ -333,7 +439,11 @@ class WorkoutViewModel(
                                 weightKg = s.weight,
                                 reps = s.reps,
                                 restSeconds = s.restSeconds,
-                                durationSeconds = s.durationSeconds.takeIf { it > 0 }
+                                durationSeconds = s.durationSeconds.takeIf { it > 0 },
+                                doneAt = s.doneAt ?: System.currentTimeMillis(),
+                                setStartTime = s.startTime,
+                                avgHeartRate = s.avgHeartRate,
+                                maxHeartRate = s.maxHeartRate
                             )
                         }
                     )
@@ -344,6 +454,12 @@ class WorkoutViewModel(
                 notes = "",
                 exercises = exercisesWithSets
             )
+            val pending = heartRateSamples.drop(heartRateSavedCount)
+            if (pending.isNotEmpty()) {
+                repository.saveHeartRateSamples(pending)
+                heartRateSavedCount = heartRateSamples.size
+            }
+            heartRateSensor.disconnect()
             _saved.value = true
         }
     }
@@ -352,6 +468,11 @@ class WorkoutViewModel(
         viewModelScope.launch {
             stopTimers()
             repository.saveSession(workoutId, buildSessionJson(), isCircuit = false)
+            val pending = heartRateSamples.drop(heartRateSavedCount)
+            if (pending.isNotEmpty()) {
+                repository.saveHeartRateSamples(pending)
+                heartRateSavedCount = heartRateSamples.size
+            }
             _exited.value = true
         }
     }
@@ -394,6 +515,10 @@ class WorkoutViewModel(
         root.put("lastWeights", encodeDoubleMap(_lastWeights.value))
         root.put("setDurations", encodeIntListMap(_setDurations))
         root.put("durationIndex", encodeIntMap(_durationIndex))
+        root.put("pendingDoneAt", _pendingDoneAt)
+        root.put("pendingSetStart", pendingSetStart)
+        pendingSetAvgHr?.let { root.put("pendingSetAvgHr", it) }
+        pendingSetMaxHr?.let { root.put("pendingSetMaxHr", it) }
 
         val sets = JSONObject()
         _completedSets.value.forEach { (exId, list) ->
@@ -404,6 +529,10 @@ class WorkoutViewModel(
                 so.put("reps", s.reps)
                 so.put("durationSeconds", s.durationSeconds)
                 if (s.restSeconds != null) so.put("restSeconds", s.restSeconds)
+                if (s.doneAt != null) so.put("doneAt", s.doneAt)
+                if (s.startTime != null) so.put("startTime", s.startTime)
+                if (s.avgHeartRate != null) so.put("avgHeartRate", s.avgHeartRate)
+                if (s.maxHeartRate != null) so.put("maxHeartRate", s.maxHeartRate)
                 arr.put(so)
             }
             sets.put(exId.toString(), arr)
@@ -434,6 +563,10 @@ class WorkoutViewModel(
         _setDurations.putAll(decodeIntListMap(root.optJSONObject("setDurations")))
         _durationIndex.clear()
         _durationIndex.putAll(decodeIntMap(root.optJSONObject("durationIndex")))
+        _pendingDoneAt = root.optLong("pendingDoneAt", 0L)
+        pendingSetStart = root.optLong("pendingSetStart", 0L)
+        pendingSetAvgHr = if (root.has("pendingSetAvgHr")) root.getInt("pendingSetAvgHr") else null
+        pendingSetMaxHr = if (root.has("pendingSetMaxHr")) root.getInt("pendingSetMaxHr") else null
 
         val completed = mutableMapOf<Long, List<WorkoutRecordedSet>>()
         root.optJSONObject("completedSets")?.let { setsObj ->
@@ -446,7 +579,11 @@ class WorkoutViewModel(
                         weight = so.getDouble("weight"),
                         reps = so.getInt("reps"),
                         durationSeconds = so.optInt("durationSeconds", 0),
-                        restSeconds = if (so.has("restSeconds")) so.getInt("restSeconds") else null
+                        restSeconds = if (so.has("restSeconds")) so.getInt("restSeconds") else null,
+                        doneAt = if (so.has("doneAt")) so.getLong("doneAt") else null,
+                        startTime = if (so.has("startTime")) so.getLong("startTime") else null,
+                        avgHeartRate = if (so.has("avgHeartRate")) so.getInt("avgHeartRate") else null,
+                        maxHeartRate = if (so.has("maxHeartRate")) so.getInt("maxHeartRate") else null
                     )
                 }
                 completed[exId] = list

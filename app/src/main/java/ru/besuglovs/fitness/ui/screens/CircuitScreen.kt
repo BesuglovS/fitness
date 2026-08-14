@@ -11,6 +11,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -21,13 +22,20 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DragHandle
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -51,27 +59,35 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.roundToInt
 import ru.besuglovs.fitness.data.Exercise
 import ru.besuglovs.fitness.ui.AppViewModelProvider
+import ru.besuglovs.fitness.ui.components.HeartRateWidget
 import ru.besuglovs.fitness.ui.viewmodel.CircuitPhase
 import ru.besuglovs.fitness.ui.viewmodel.CircuitViewModel
 import ru.besuglovs.fitness.util.formatGap
@@ -108,6 +124,12 @@ fun CircuitScreen(onFinish: () -> Unit, onExit: () -> Unit) {
     val saved by vm.saved.collectAsStateWithLifecycle()
     val exited by vm.exited.collectAsStateWithLifecycle()
     val resumeGapSeconds by vm.resumeGapSeconds.collectAsStateWithLifecycle()
+    val roundDurations by vm.roundDurations.collectAsStateWithLifecycle()
+    val setDurations by vm.setDurations.collectAsStateWithLifecycle()
+    val heartRateBpm by vm.heartRateBpm.collectAsStateWithLifecycle()
+    val heartRateStatus by vm.heartRateStatus.collectAsStateWithLifecycle()
+    val heartRateDeviceName by vm.heartRateDeviceName.collectAsStateWithLifecycle()
+    val heartRateRecorded by vm.heartRateRecorded.collectAsStateWithLifecycle()
 
     var showFinishConfirm by remember { mutableStateOf(false) }
     var showExitConfirm by remember { mutableStateOf(false) }
@@ -156,12 +178,28 @@ fun CircuitScreen(onFinish: () -> Unit, onExit: () -> Unit) {
             )
         }
     ) { padding ->
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            when (phase) {
+            HeartRateWidget(
+                bpm = heartRateBpm,
+                status = heartRateStatus,
+                deviceName = heartRateDeviceName,
+                recordedCount = heartRateRecorded,
+                onConnect = vm::connectHeartRate,
+                onDisconnect = vm::disconnectHeartRate,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .weight(1f)
+            ) {
+                when (phase) {
                 CircuitPhase.SETUP -> {
                     CircuitSetupContent(
                         allExercises = allExercises,
@@ -188,6 +226,7 @@ fun CircuitScreen(onFinish: () -> Unit, onExit: () -> Unit) {
                         pauseElapsed = pauseElapsed,
                         onSelectExercise = vm::selectExercise,
                         onSelectNext = vm::selectNextExercise,
+                        onMoveExercise = vm::moveExercise,
                         onTogglePause = vm::toggleSetPause,
                         onComplete = vm::completeSet
                     )
@@ -199,6 +238,8 @@ fun CircuitScreen(onFinish: () -> Unit, onExit: () -> Unit) {
                         exercises = selectedExercises,
                         entryWeights = entryWeights,
                         entryReps = entryReps,
+                        roundDurations = roundDurations,
+                        setDurations = setDurations,
                         restElapsed = restElapsed,
                         restLimit = vm.restLimitSeconds,
                         restPaused = vm.restPaused.collectAsStateWithLifecycle().value,
@@ -210,6 +251,7 @@ fun CircuitScreen(onFinish: () -> Unit, onExit: () -> Unit) {
                     )
                 }
             }
+        }
         }
     }
 
@@ -372,6 +414,7 @@ private fun CircuitSetupContent(
                                         onWeightChange(ex.id, it.filter { c -> c.isDigit() || c == '.' || c == ',' })
                                     },
                                     label = { Text("Вес, кг") },
+                                    placeholder = { Text("0") },
                                     singleLine = true,
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                     modifier = Modifier.weight(1f)
@@ -382,6 +425,7 @@ private fun CircuitSetupContent(
                                         onRepsChange(ex.id, it.filter(Char::isDigit).take(3))
                                     },
                                     label = { Text("Повторения") },
+                                    placeholder = { Text("10") },
                                     singleLine = true,
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                     modifier = Modifier.weight(1f)
@@ -412,37 +456,61 @@ private fun AddExerciseDropdown(
     onSelect: (Exercise) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
 
     ExposedDropdownMenuBox(
         expanded = expanded,
-        onExpandedChange = { expanded = it }
+        onExpandedChange = { newExpanded ->
+            expanded = newExpanded
+            if (!newExpanded) query = ""
+        }
     ) {
         OutlinedTextField(
-            value = "",
-            onValueChange = {},
-            readOnly = true,
+            value = query,
+            onValueChange = {
+                query = it
+                if (!expanded) expanded = true
+            },
             placeholder = { Text("Добавить упражнение из справочника") },
+            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = "Поиск") },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            singleLine = true,
             modifier = Modifier
-                .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                .menuAnchor(MenuAnchorType.PrimaryEditable)
                 .fillMaxWidth()
         )
         ExposedDropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false }
         ) {
+            val trimmed = query.trim()
+            val filtered = if (trimmed.isEmpty()) {
+                exercises
+            } else {
+                exercises.filter { ex ->
+                    ex.name.contains(trimmed, ignoreCase = true) ||
+                        ex.muscleGroup.contains(trimmed, ignoreCase = true)
+                }
+            }
+
             if (exercises.isEmpty()) {
                 DropdownMenuItem(
                     text = { Text("В библиотеке нет упражнений") },
                     onClick = { expanded = false }
                 )
+            } else if (filtered.isEmpty()) {
+                DropdownMenuItem(
+                    text = { Text("Ничего не найдено") },
+                    onClick = {}
+                )
             } else {
-                exercises.forEach { ex ->
+                filtered.forEach { ex ->
                     DropdownMenuItem(
                         text = { Text(ex.name) },
                         onClick = {
-                            onSelect(ex)
+                            query = ""
                             expanded = false
+                            onSelect(ex)
                         }
                     )
                 }
@@ -463,6 +531,7 @@ private fun CircuitExerciseContent(
     pauseElapsed: Long,
     onSelectExercise: (Long) -> Unit,
     onSelectNext: () -> Unit,
+    onMoveExercise: (Int, Int) -> Unit,
     onTogglePause: () -> Unit,
     onComplete: () -> Unit
 ) {
@@ -579,15 +648,17 @@ private fun CircuitExerciseContent(
                 }
                 Spacer(Modifier.height(12.dp))
                 Text(
-                    "Упражнения круга",
+                    "Упражнения круга · зажми и перетащи, чтобы изменить порядок",
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                ExerciseSelectRows(
+                Spacer(Modifier.height(4.dp))
+                ReorderableExerciseGrid(
                     exercises = exercises,
-                    current = null,
                     roundCompletedIds = roundCompletedIds,
-                    onSelectExercise = onSelectExercise
+                    onSelectExercise = onSelectExercise,
+                    onMove = onMoveExercise,
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
         }
@@ -607,12 +678,14 @@ private fun ExerciseSelectRows(
                 rowExercises.forEach { ex ->
                     val done = roundCompletedIds.contains(ex.id)
                     val active = current?.id == ex.id
-                    ExerciseSelectButton(
+                    PrettyExerciseButton(
                         exercise = ex,
                         isActive = active,
                         isDone = done,
                         onClick = { onSelectExercise(ex.id) },
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(72.dp)
                     )
                 }
             }
@@ -621,16 +694,20 @@ private fun ExerciseSelectRows(
 }
 
 @Composable
-private fun ExerciseSelectButton(
+private fun PrettyExerciseButton(
     exercise: Exercise,
     isActive: Boolean,
     isDone: Boolean,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    elevation: Dp = 1.dp,
+    trailing: (@Composable () -> Unit)? = null,
+    highlightBorder: Boolean = false
 ) {
     val background = when {
         isActive -> MaterialTheme.colorScheme.primary
         isDone -> DoneButtonBg
+        highlightBorder -> LightYellowBg
         else -> LightGreenBg
     }
     val contentColor = when {
@@ -641,31 +718,189 @@ private fun ExerciseSelectButton(
     val borderColor = when {
         isActive -> MaterialTheme.colorScheme.primary
         isDone -> DoneButtonBorder
+        highlightBorder -> MaterialTheme.colorScheme.primary
         else -> AvailableButtonBorder
     }
-    val borderWidth = if (isActive) 3.dp else 2.dp
+    val borderWidth = if (isActive || highlightBorder) 3.dp else 2.dp
 
     Surface(
         color = background,
         contentColor = contentColor,
-        shape = RectangleShape,
+        shape = RoundedCornerShape(16.dp),
         border = BorderStroke(borderWidth, borderColor),
+        shadowElevation = if (isActive) 6.dp else elevation,
         modifier = modifier
             .fillMaxWidth()
-            .height(64.dp)
+            .heightIn(min = 64.dp)
             .clickable(enabled = !isActive && !isDone, onClick = onClick)
     ) {
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 exercise.name,
-                style = MaterialTheme.typography.titleLarge,
+                style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 12.dp)
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
             )
+            Spacer(Modifier.width(6.dp))
+            when {
+                isDone -> Icon(
+                    Icons.Filled.CheckCircle,
+                    contentDescription = "Выполнено",
+                    tint = DoneButtonBorder,
+                    modifier = Modifier.size(24.dp)
+                )
+                isActive -> Icon(
+                    Icons.Filled.CheckCircle,
+                    contentDescription = "Текущее",
+                    tint = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.size(24.dp)
+                )
+                else -> trailing?.invoke()
+            }
+        }
+    }
+}
+
+@Composable
+private fun ExerciseReorderCell(
+    exercise: Exercise,
+    isDone: Boolean,
+    offset: IntOffset,
+    elevation: Dp,
+    isDropTarget: Boolean,
+    onSelect: () -> Unit,
+    onDragStart: () -> Unit,
+    onDragBy: (Offset) -> Unit,
+    onDragEnd: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    PrettyExerciseButton(
+        exercise = exercise,
+        isActive = false,
+        isDone = isDone,
+        onClick = onSelect,
+        elevation = elevation,
+        highlightBorder = isDropTarget,
+        trailing = {
+            Icon(
+                Icons.Filled.DragHandle,
+                contentDescription = "Перетащить",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(24.dp)
+            )
+        },
+        modifier = modifier
+            .height(72.dp)
+            .offset { offset }
+            .pointerInput(Unit) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = { onDragStart() },
+                    onDragEnd = { onDragEnd() },
+                    onDragCancel = { onDragEnd() },
+                    onDrag = { change, amount ->
+                        change.consume()
+                        onDragBy(amount)
+                    }
+                )
+            }
+    )
+}
+
+@Composable
+private fun ReorderableExerciseGrid(
+    exercises: List<Exercise>,
+    roundCompletedIds: Set<Long>,
+    onSelectExercise: (Long) -> Unit,
+    onMove: (Int, Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var draggingIndex by remember { mutableStateOf<Int?>(null) }
+    var dragOffset by remember { mutableStateOf(Offset.Zero) }
+    var targetIndex by remember { mutableStateOf<Int?>(null) }
+    val density = LocalDensity.current
+    val rowStepPx = with(density) { (72.dp + 8.dp).toPx() }
+
+    BoxWithConstraints(
+        modifier = modifier.verticalScroll(rememberScrollState())
+    ) {
+        val colSpacing = 8.dp
+        val colStepPx = with(density) { ((maxWidth - colSpacing) / 2f + colSpacing).toPx() }
+        val lastIndex = exercises.lastIndex
+        val lastRow = lastIndex / 2
+
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            exercises.chunked(2).forEachIndexed { rowIndex, rowExercises ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(colSpacing)
+                ) {
+                    rowExercises.forEach { ex ->
+                        val index = rowIndex * 2 + rowExercises.indexOf(ex)
+                        key(ex.id) {
+                            val isDragging = draggingIndex == index
+                            val currentIdx = draggingIndex ?: index
+                            val row = currentIdx / 2
+                            val col = currentIdx % 2
+                            val minY = -row * rowStepPx
+                            val maxY = (lastRow - row) * rowStepPx
+                            val minX = -col * colStepPx
+                            val maxX = ((row * 2 + 1).coerceAtMost(lastIndex) % 2 - col) * colStepPx
+                            val cellOffset = if (isDragging) {
+                                IntOffset(
+                                    dragOffset.x.coerceIn(minX, maxX).roundToInt(),
+                                    dragOffset.y.coerceIn(minY, maxY).roundToInt()
+                                )
+                            } else {
+                                IntOffset.Zero
+                            }
+                            ExerciseReorderCell(
+                                exercise = ex,
+                                isDone = roundCompletedIds.contains(ex.id),
+                                offset = cellOffset,
+                                elevation = if (isDragging) 12.dp else 0.dp,
+                                isDropTarget = draggingIndex != null && !isDragging && targetIndex == index,
+                                onSelect = { onSelectExercise(ex.id) },
+                                onDragStart = {
+                                    draggingIndex = index
+                                    targetIndex = index
+                                    dragOffset = Offset.Zero
+                                },
+                                onDragBy = { delta ->
+                                    dragOffset += delta
+                                    val cur = draggingIndex ?: index
+                                    val curRow = cur / 2
+                                    val curCol = cur % 2
+                                    val newRow = (curRow + (dragOffset.y / rowStepPx).roundToInt())
+                                        .coerceIn(0, lastRow)
+                                    val newCol = curCol + (dragOffset.x / colStepPx).roundToInt()
+                                    targetIndex = (newRow * 2 + newCol).coerceIn(0, lastIndex)
+                                },
+                                onDragEnd = {
+                                    val from = draggingIndex
+                                    val to = targetIndex
+                                    if (from != null && to != null && to != from) {
+                                        onMove(from, to)
+                                    }
+                                    draggingIndex = null
+                                    targetIndex = null
+                                    dragOffset = Offset.Zero
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -676,6 +911,8 @@ private fun CircuitEntryContent(
     exercises: List<Exercise>,
     entryWeights: Map<Long, String>,
     entryReps: Map<Long, String>,
+    roundDurations: List<Int>,
+    setDurations: Map<Long, List<Int>>,
     restElapsed: Long,
     restLimit: Int,
     restPaused: Boolean,
@@ -712,6 +949,16 @@ private fun CircuitEntryContent(
             fontWeight = FontWeight.SemiBold
         )
 
+        if (roundDurations.isNotEmpty()) {
+            Text(
+                roundDurations.mapIndexed { index, seconds ->
+                    "Круг ${index + 1}: ${formatTimer(seconds.toLong())}"
+                }.joinToString("  ·  "),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
         if (showEntries) {
             Column(
                 modifier = Modifier
@@ -731,6 +978,15 @@ private fun CircuitEntryContent(
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Medium
                             )
+                            val exerciseTimes = setDurations[ex.id].orEmpty()
+                            if (exerciseTimes.isNotEmpty()) {
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    exerciseTimes.joinToString(" · ") { formatTimer(it.toLong()) },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                             Spacer(Modifier.height(8.dp))
                             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 OutlinedTextField(
@@ -739,6 +995,7 @@ private fun CircuitEntryContent(
                                         onWeightChange(ex.id, it.filter { c -> c.isDigit() || c == '.' || c == ',' })
                                     },
                                     label = { Text("Вес, кг") },
+                                    placeholder = { Text("0") },
                                     singleLine = true,
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                     modifier = Modifier.weight(1f)
@@ -749,6 +1006,7 @@ private fun CircuitEntryContent(
                                         onRepsChange(ex.id, it.filter(Char::isDigit).take(3))
                                     },
                                     label = { Text("Повторения") },
+                                    placeholder = { Text("10") },
                                     singleLine = true,
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                     modifier = Modifier.weight(1f)

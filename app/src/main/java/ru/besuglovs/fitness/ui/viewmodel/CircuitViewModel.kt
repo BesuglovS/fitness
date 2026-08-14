@@ -12,18 +12,23 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import ru.besuglovs.fitness.FitnessApp
+import ru.besuglovs.fitness.ble.HeartRateSensor
+import ru.besuglovs.fitness.ble.HeartRateStatus
 import ru.besuglovs.fitness.data.Exercise
 import ru.besuglovs.fitness.data.ExerciseWithSets
 import ru.besuglovs.fitness.data.FitnessRepository
+import ru.besuglovs.fitness.data.HeartRateSample
 import ru.besuglovs.fitness.data.SetEntry
 import ru.besuglovs.fitness.data.decodeDoubleMap
 import ru.besuglovs.fitness.data.decodeIntListMap
 import ru.besuglovs.fitness.data.decodeIntMap
 import ru.besuglovs.fitness.data.decodeLongArray
+import ru.besuglovs.fitness.data.decodeLongListMap
 import ru.besuglovs.fitness.data.decodeStringMap
 import ru.besuglovs.fitness.data.encodeDoubleMap
 import ru.besuglovs.fitness.data.encodeIntListMap
 import ru.besuglovs.fitness.data.encodeIntMap
+import ru.besuglovs.fitness.data.encodeLongListMap
 import ru.besuglovs.fitness.data.encodeStringMap
 import ru.besuglovs.fitness.util.weightLabel
 
@@ -33,7 +38,10 @@ data class RecordedSet(
     val weight: Double,
     val reps: Int,
     val durationSeconds: Int = 0,
-    val restSeconds: Int? = null
+    val restSeconds: Int? = null,
+    val startTime: Long? = null,
+    val avgHeartRate: Int? = null,
+    val maxHeartRate: Int? = null
 )
 
 class CircuitViewModel(
@@ -108,20 +116,73 @@ class CircuitViewModel(
     private val _resumeGapSeconds = MutableStateFlow<Long?>(null)
     val resumeGapSeconds: StateFlow<Long?> = _resumeGapSeconds.asStateFlow()
 
+    private val heartRateSensor = HeartRateSensor(getApplication())
+
+    private val _heartRateBpm = MutableStateFlow<Int?>(null)
+    val heartRateBpm: StateFlow<Int?> = _heartRateBpm.asStateFlow()
+
+    private val _heartRateStatus = MutableStateFlow(HeartRateStatus.DISCONNECTED)
+    val heartRateStatus: StateFlow<HeartRateStatus> = _heartRateStatus.asStateFlow()
+
+    private val _heartRateDeviceName = MutableStateFlow<String?>(null)
+    val heartRateDeviceName: StateFlow<String?> = _heartRateDeviceName.asStateFlow()
+
+    private val _heartRateRecorded = MutableStateFlow(0)
+    val heartRateRecorded: StateFlow<Int> = _heartRateRecorded.asStateFlow()
+
+    private val heartRateSamples = mutableListOf<HeartRateSample>()
+    private var heartRateSavedCount = 0
+
+    private val _roundDurations = MutableStateFlow<List<Int>>(emptyList())
+    val roundDurations: StateFlow<List<Int>> = _roundDurations.asStateFlow()
+
     private var setJob: Job? = null
     private var restJob: Job? = null
     private var setRunningSeconds = 0L
-    private var _accumulatedPause = 0L
 
-    private val _setDurations = mutableMapOf<Long, MutableList<Int>>()
+    private val _setDurations = MutableStateFlow<Map<Long, List<Int>>>(emptyMap())
+    val setDurations: StateFlow<Map<Long, List<Int>>> = _setDurations.asStateFlow()
     private val _durationIndex = mutableMapOf<Long, Int>()
-    private var _pendingRestSeconds: Int? = null
     private var _roundTimes = mutableListOf<Map<Long, Long>>()
     private var _currentRoundTimes = mutableMapOf<Long, Long>()
+    private var _currentRoundStart = 0L
+    private val _pendingSetRests = mutableMapOf<Long, Int>()
+    private val _setPauseSeconds = mutableMapOf<Long, Int>()
+    private val _setStartTimes = mutableMapOf<Long, MutableList<Long>>()
+    private var pendingSetStart = 0L
+    private var _lastCompletedExerciseId: Long? = null
+    private var _lastSetEndTime = 0L
 
     init {
         viewModelScope.launch {
             repository.exercises().collect { _allExercises.value = it }
+        }
+        viewModelScope.launch {
+            heartRateSensor.bpm.collect { _heartRateBpm.value = it }
+        }
+        viewModelScope.launch {
+            heartRateSensor.status.collect { _heartRateStatus.value = it }
+        }
+        viewModelScope.launch {
+            heartRateSensor.deviceName.collect { _heartRateDeviceName.value = it }
+        }
+        viewModelScope.launch {
+            heartRateSensor.readings.collect { bpm ->
+                heartRateSamples.add(
+                    HeartRateSample(
+                        workoutId = workoutId,
+                        timestamp = System.currentTimeMillis(),
+                        bpm = bpm
+                    )
+                )
+                _heartRateRecorded.value = heartRateSamples.size
+            }
+        }
+        viewModelScope.launch {
+            val existing = repository.heartRateSamplesOnce(workoutId)
+            heartRateSamples.addAll(existing)
+            heartRateSavedCount = heartRateSamples.size
+            _heartRateRecorded.value = heartRateSamples.size
         }
         viewModelScope.launch {
             val workout = repository.getWorkoutOnce(workoutId)
@@ -133,6 +194,19 @@ class CircuitViewModel(
                 if (_resumeGapSeconds.value == null) startResumedTimers()
             }
         }
+    }
+
+    fun connectHeartRate() {
+        viewModelScope.launch { heartRateSensor.connect() }
+    }
+
+    fun disconnectHeartRate() {
+        heartRateSensor.disconnect()
+    }
+
+    override fun onCleared() {
+        heartRateSensor.disconnect()
+        super.onCleared()
     }
 
     private fun startResumedTimers() {
@@ -164,6 +238,15 @@ class CircuitViewModel(
         _setupReps.value = _setupReps.value - exerciseId
     }
 
+    fun moveExercise(fromIndex: Int, toIndex: Int) {
+        val list = _selectedExercises.value.toMutableList()
+        if (fromIndex < 0 || fromIndex >= list.size) return
+        if (toIndex < 0 || toIndex >= list.size) return
+        val item = list.removeAt(fromIndex)
+        list.add(toIndex, item)
+        _selectedExercises.value = list
+    }
+
     fun startTraining() {
         if (_selectedExercises.value.isEmpty()) return
         val initialWeights = _setupWeights.value.mapNotNull { (id, value) ->
@@ -174,9 +257,16 @@ class CircuitViewModel(
         _roundCompletedIds.value = emptySet()
         _activeExercise.value = null
         _phase.value = CircuitPhase.EXERCISE
-        _accumulatedPause = 0L
         _roundTimes.clear()
         _currentRoundTimes = mutableMapOf()
+        _roundDurations.value = emptyList()
+        _currentRoundStart = System.currentTimeMillis()
+        _pendingSetRests.clear()
+        _setPauseSeconds.clear()
+        _setStartTimes.clear()
+        pendingSetStart = 0L
+        _lastCompletedExerciseId = null
+        _lastSetEndTime = 0L
         stopTimers()
     }
 
@@ -196,7 +286,15 @@ class CircuitViewModel(
     }
 
     private fun setActiveExercise(exercise: Exercise) {
+        val lastCompleted = _lastCompletedExerciseId
+        if (lastCompleted != null && _lastSetEndTime > 0L) {
+            val pause = ((System.currentTimeMillis() - _lastSetEndTime) / 1000).toInt().coerceAtLeast(0)
+            _pendingSetRests[lastCompleted] = pause + (_setPauseSeconds.remove(lastCompleted) ?: 0)
+        }
+        _lastCompletedExerciseId = null
+        _lastSetEndTime = 0L
         _activeExercise.value = exercise
+        pendingSetStart = System.currentTimeMillis()
         startSetTimer()
     }
 
@@ -205,18 +303,27 @@ class CircuitViewModel(
         if (list.isEmpty()) return
         val exerciseId = _activeExercise.value?.id ?: return
         stopTimers()
-        _setDurations.getOrPut(exerciseId) { mutableListOf() }.add(_setElapsed.value.toInt())
-        _accumulatedPause += _pauseElapsed.value
+        _setDurations.value = _setDurations.value + (exerciseId to
+            ((_setDurations.value[exerciseId] ?: emptyList()) + _setElapsed.value.toInt()))
+        _setPauseSeconds[exerciseId] = _pauseElapsed.value.toInt()
+        _setStartTimes.getOrPut(exerciseId) { mutableListOf() }.add(pendingSetStart)
         _currentRoundTimes[exerciseId] = System.currentTimeMillis()
         _roundCompletedIds.value = _roundCompletedIds.value + exerciseId
         _activeExercise.value = null
+        _lastCompletedExerciseId = exerciseId
         if (_roundCompletedIds.value.size >= list.size) {
+            _lastSetEndTime = 0L
+            val lastCompletion = _currentRoundTimes.values.maxOrNull() ?: System.currentTimeMillis()
+            val duration = ((lastCompletion - _currentRoundStart) / 1000).toInt().coerceAtLeast(0)
+            _roundDurations.value = _roundDurations.value + duration
             _roundTimes.add(_currentRoundTimes)
             _currentRoundTimes = mutableMapOf()
             initEntryState()
             _phase.value = CircuitPhase.REP_ENTRY
             _restElapsed.value = 0L
             startRestTimer()
+        } else {
+            _lastSetEndTime = System.currentTimeMillis()
         }
     }
 
@@ -231,11 +338,11 @@ class CircuitViewModel(
     fun startNextCircuit() {
         if (_selectedExercises.value.isEmpty()) return
         commitEntrySets()
-        _pendingRestSeconds = _restElapsed.value.toInt()
         _circuitNumber.value += 1
         _roundCompletedIds.value = emptySet()
         _activeExercise.value = null
         _phase.value = CircuitPhase.EXERCISE
+        _currentRoundStart = System.currentTimeMillis()
         stopTimers()
     }
 
@@ -245,9 +352,9 @@ class CircuitViewModel(
         var count = _completedSets.value.values.sumOf { it.size }
         if (_phase.value == CircuitPhase.REP_ENTRY) {
             for (ex in _selectedExercises.value) {
-                val w = _entryWeights.value[ex.id]?.replace(',', '.')?.toDoubleOrNull()
-                val r = _entryReps.value[ex.id]?.toIntOrNull()
-                if (w != null && w >= 0 && r != null && r > 0) count++
+                val w = _entryWeights.value[ex.id]?.replace(',', '.')?.toDoubleOrNull() ?: 0.0
+                val r = _entryReps.value[ex.id]?.toIntOrNull() ?: 10
+                if (w >= 0 && r > 0) count++
             }
         }
         return count
@@ -257,32 +364,57 @@ class CircuitViewModel(
         val weights = mutableMapOf<Long, String>()
         val reps = mutableMapOf<Long, String>()
         for (ex in _selectedExercises.value) {
-            weights[ex.id] = _lastWeights.value[ex.id]?.let { weightLabel(it) } ?: ""
-            reps[ex.id] = _setupReps.value[ex.id] ?: ""
+            weights[ex.id] = _lastWeights.value[ex.id]?.let { weightLabel(it) } ?: "0"
+            reps[ex.id] = _setupReps.value[ex.id] ?: "10"
         }
         _entryWeights.value = weights
         _entryReps.value = reps
     }
 
     private fun commitEntrySets() {
+        val lastCompleted = _lastCompletedExerciseId
+        if (lastCompleted != null && _phase.value == CircuitPhase.REP_ENTRY) {
+            _pendingSetRests[lastCompleted] =
+                _restElapsed.value.toInt() + (_setPauseSeconds.remove(lastCompleted) ?: 0)
+        }
         val updated = _completedSets.value.toMutableMap()
         val weights = _lastWeights.value.toMutableMap()
-        val rest = (_pendingRestSeconds ?: 0) + _accumulatedPause.toInt()
         for (ex in _selectedExercises.value) {
-            val w = _entryWeights.value[ex.id]?.replace(',', '.')?.toDoubleOrNull() ?: continue
-            val r = _entryReps.value[ex.id]?.toIntOrNull() ?: continue
+            val w = _entryWeights.value[ex.id]?.replace(',', '.')?.toDoubleOrNull() ?: 0.0
+            val r = _entryReps.value[ex.id]?.toIntOrNull() ?: 10
             if (w < 0 || r <= 0) continue
             val durationIdx = _durationIndex[ex.id] ?: 0
-            val duration = _setDurations[ex.id]?.getOrNull(durationIdx) ?: 0
+            val duration = _setDurations.value[ex.id]?.getOrNull(durationIdx) ?: 0
             _durationIndex[ex.id] = durationIdx + 1
+            val rest = _pendingSetRests[ex.id] ?: 0
+            val start = _setStartTimes[ex.id]?.getOrNull(durationIdx)
+            val end = _roundTimes.getOrNull(durationIdx)?.get(ex.id) ?: _currentRoundTimes[ex.id]
+            val (avg, max) = computeSetHrStats(start, end)
             updated[ex.id] = (updated[ex.id].orEmpty()) +
-                RecordedSet(w, r, durationSeconds = duration, restSeconds = rest)
+                RecordedSet(
+                    w,
+                    r,
+                    durationSeconds = duration,
+                    restSeconds = rest,
+                    startTime = start,
+                    avgHeartRate = avg,
+                    maxHeartRate = max
+                )
             weights[ex.id] = w
         }
-        _pendingRestSeconds = null
-        _accumulatedPause = 0L
+        _setPauseSeconds.clear()
+        _pendingSetRests.clear()
+        _lastCompletedExerciseId = null
+        _lastSetEndTime = 0L
         _completedSets.value = updated
         _lastWeights.value = weights
+    }
+
+    private fun computeSetHrStats(start: Long?, end: Long?): Pair<Int?, Int?> {
+        if (start == null || end == null || end <= start) return null to null
+        val samples = heartRateSamples.filter { it.timestamp in start..end }
+        if (samples.isEmpty()) return null to null
+        return samples.map { it.bpm }.average().toInt() to samples.maxOf { it.bpm }
     }
 
     private fun startSetTimer(
@@ -356,7 +488,11 @@ class CircuitViewModel(
                                 restSeconds = s.restSeconds,
                                 durationSeconds = s.durationSeconds.takeIf { it > 0 },
                                 doneAt = _roundTimes.getOrNull(i)?.get(ex.id)
-                                    ?: System.currentTimeMillis()
+                                    ?: _currentRoundTimes[ex.id]
+                                    ?: System.currentTimeMillis(),
+                                setStartTime = s.startTime,
+                                avgHeartRate = s.avgHeartRate,
+                                maxHeartRate = s.maxHeartRate
                             )
                         }
                     )
@@ -368,6 +504,12 @@ class CircuitViewModel(
                 exercises = exercisesWithSets,
                 isCircuit = true
             )
+            val pending = heartRateSamples.drop(heartRateSavedCount)
+            if (pending.isNotEmpty()) {
+                repository.saveHeartRateSamples(pending)
+                heartRateSavedCount = heartRateSamples.size
+            }
+            heartRateSensor.disconnect()
             _saved.value = true
         }
     }
@@ -376,6 +518,11 @@ class CircuitViewModel(
         viewModelScope.launch {
             stopTimers()
             repository.saveSession(workoutId, buildSessionJson(), isCircuit = true)
+            val pending = heartRateSamples.drop(heartRateSavedCount)
+            if (pending.isNotEmpty()) {
+                repository.saveHeartRateSamples(pending)
+                heartRateSavedCount = heartRateSamples.size
+            }
             _exited.value = true
         }
     }
@@ -397,6 +544,8 @@ class CircuitViewModel(
                     } else {
                         startSetTimer(initialElapsed = _setElapsed.value)
                     }
+                } else if (_lastSetEndTime > 0L && !countGapAsRest) {
+                    _lastSetEndTime += gap * 1000
                 }
             }
             CircuitPhase.SETUP -> Unit
@@ -415,11 +564,15 @@ class CircuitViewModel(
         root.put("setElapsed", _setElapsed.value)
         root.put("restElapsed", _restElapsed.value)
         root.put("pauseElapsed", _pauseElapsed.value)
-        root.put("accumulatedPause", _accumulatedPause)
         root.put("lastWeights", encodeDoubleMap(_lastWeights.value))
-        root.put("setDurations", encodeIntListMap(_setDurations))
+        root.put("setDurations", encodeIntListMap(_setDurations.value))
         root.put("durationIndex", encodeIntMap(_durationIndex))
-        _pendingRestSeconds?.let { root.put("pendingRestSeconds", it) }
+        root.put("setStartTimes", encodeLongListMap(_setStartTimes))
+        root.put("pendingSetStart", pendingSetStart)
+        root.put("pendingSetRests", encodeIntMap(_pendingSetRests))
+        root.put("setPauseSeconds", encodeIntMap(_setPauseSeconds))
+        _lastCompletedExerciseId?.let { root.put("lastCompletedExerciseId", it) }
+        root.put("lastSetEndTime", _lastSetEndTime)
 
         val selected = JSONArray()
         _selectedExercises.value.forEach { ex ->
@@ -447,6 +600,9 @@ class CircuitViewModel(
                 so.put("reps", s.reps)
                 so.put("durationSeconds", s.durationSeconds)
                 if (s.restSeconds != null) so.put("restSeconds", s.restSeconds)
+                if (s.startTime != null) so.put("startTime", s.startTime)
+                if (s.avgHeartRate != null) so.put("avgHeartRate", s.avgHeartRate)
+                if (s.maxHeartRate != null) so.put("maxHeartRate", s.maxHeartRate)
                 arr.put(so)
             }
             sets.put(exId.toString(), arr)
@@ -460,6 +616,11 @@ class CircuitViewModel(
             roundTimes.put(ro)
         }
         root.put("roundTimes", roundTimes)
+
+        val roundDurations = JSONArray()
+        _roundDurations.value.forEach { roundDurations.put(it) }
+        root.put("roundDurations", roundDurations)
+        root.put("currentRoundStart", _currentRoundStart)
         return root.toString()
     }
 
@@ -474,13 +635,23 @@ class CircuitViewModel(
         _setElapsed.value = root.optLong("setElapsed", 0L)
         _restElapsed.value = root.optLong("restElapsed", 0L)
         _pauseElapsed.value = root.optLong("pauseElapsed", 0L)
-        _accumulatedPause = root.optLong("accumulatedPause", 0L)
         _lastWeights.value = decodeDoubleMap(root.optJSONObject("lastWeights"))
-        _setDurations.clear()
-        _setDurations.putAll(decodeIntListMap(root.optJSONObject("setDurations")))
+        _setDurations.value = decodeIntListMap(root.optJSONObject("setDurations"))
         _durationIndex.clear()
         _durationIndex.putAll(decodeIntMap(root.optJSONObject("durationIndex")))
-        _pendingRestSeconds = if (root.has("pendingRestSeconds")) root.getInt("pendingRestSeconds") else null
+        _setStartTimes.clear()
+        _setStartTimes.putAll(decodeLongListMap(root.optJSONObject("setStartTimes")))
+        pendingSetStart = root.optLong("pendingSetStart", 0L)
+        _pendingSetRests.clear()
+        _pendingSetRests.putAll(decodeIntMap(root.optJSONObject("pendingSetRests")))
+        _setPauseSeconds.clear()
+        _setPauseSeconds.putAll(decodeIntMap(root.optJSONObject("setPauseSeconds")))
+        _lastCompletedExerciseId = if (root.has("lastCompletedExerciseId")) {
+            root.getLong("lastCompletedExerciseId")
+        } else {
+            null
+        }
+        _lastSetEndTime = root.optLong("lastSetEndTime", 0L)
 
         val selected = mutableListOf<Exercise>()
         root.optJSONArray("selectedExercises")?.let { arr ->
@@ -513,7 +684,10 @@ class CircuitViewModel(
                         weight = so.getDouble("weight"),
                         reps = so.getInt("reps"),
                         durationSeconds = so.optInt("durationSeconds", 0),
-                        restSeconds = if (so.has("restSeconds")) so.getInt("restSeconds") else null
+                        restSeconds = if (so.has("restSeconds")) so.getInt("restSeconds") else null,
+                        startTime = if (so.has("startTime")) so.getLong("startTime") else null,
+                        avgHeartRate = if (so.has("avgHeartRate")) so.getInt("avgHeartRate") else null,
+                        maxHeartRate = if (so.has("maxHeartRate")) so.getInt("maxHeartRate") else null
                     )
                 }
                 completed[exId] = list
@@ -532,6 +706,17 @@ class CircuitViewModel(
         }
         _roundTimes.clear()
         _roundTimes.addAll(roundTimes)
+
+        val roundDurations = mutableListOf<Int>()
+        root.optJSONArray("roundDurations")?.let { arr ->
+            for (i in 0 until arr.length()) roundDurations.add(arr.getInt(i))
+        }
+        _roundDurations.value = roundDurations
+        _currentRoundStart = if (root.has("currentRoundStart")) {
+            root.getLong("currentRoundStart")
+        } else {
+            System.currentTimeMillis()
+        }
 
         val phaseName = root.optString("phase", CircuitPhase.SETUP.name)
         _phase.value = try {

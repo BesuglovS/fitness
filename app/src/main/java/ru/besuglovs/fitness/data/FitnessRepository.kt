@@ -7,6 +7,7 @@ class FitnessRepository(private val db: AppDatabase) {
     val exerciseDao get() = db.exerciseDao()
     val workoutDao get() = db.workoutDao()
     val statsDao get() = db.statsDao()
+    val heartRateDao get() = db.heartRateDao()
 
     // Exercises
     fun exercises(): Flow<List<Exercise>> = db.exerciseDao().getAll()
@@ -33,6 +34,16 @@ class FitnessRepository(private val db: AppDatabase) {
 
     suspend fun discardUnfinished() = db.workoutDao().deleteUnfinished()
     suspend fun deleteWorkout(id: Long) = db.workoutDao().delete(id)
+
+    // Heart rate
+    fun heartRateSamples(workoutId: Long): Flow<List<HeartRateSample>> =
+        db.heartRateDao().getForWorkout(workoutId)
+    suspend fun heartRateSamplesOnce(workoutId: Long): List<HeartRateSample> =
+        db.heartRateDao().getForWorkoutOnce(workoutId)
+    suspend fun saveHeartRateSamples(samples: List<HeartRateSample>) =
+        db.heartRateDao().insertAll(samples)
+    suspend fun allHeartRateSamplesOnce(): List<HeartRateSample> =
+        db.heartRateDao().getAllOnce()
 
     // Export helpers
     suspend fun allExercisesOnce(): List<Exercise> = db.exerciseDao().getAllOnce()

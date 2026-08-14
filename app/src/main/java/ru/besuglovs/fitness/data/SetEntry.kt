@@ -25,5 +25,8 @@ data class SetEntry(
     val reps: Int? = null,
     val restSeconds: Int? = null,
     val durationSeconds: Int? = null,
+    val setStartTime: Long? = null,
+    val avgHeartRate: Int? = null,
+    val maxHeartRate: Int? = null,
     val doneAt: Long = System.currentTimeMillis()
 )

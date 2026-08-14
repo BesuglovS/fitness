@@ -24,7 +24,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -32,6 +34,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -67,6 +70,7 @@ import kotlin.math.PI
 import kotlin.math.cos
 import ru.besuglovs.fitness.data.Exercise
 import ru.besuglovs.fitness.ui.AppViewModelProvider
+import ru.besuglovs.fitness.ui.components.HeartRateWidget
 import ru.besuglovs.fitness.ui.viewmodel.WorkoutPhase
 import ru.besuglovs.fitness.ui.viewmodel.WorkoutViewModel
 import ru.besuglovs.fitness.util.formatGap
@@ -97,6 +101,10 @@ fun WorkoutScreen(onFinish: () -> Unit, onExit: () -> Unit) {
     val saved by vm.saved.collectAsStateWithLifecycle()
     val exited by vm.exited.collectAsStateWithLifecycle()
     val resumeGapSeconds by vm.resumeGapSeconds.collectAsStateWithLifecycle()
+    val heartRateBpm by vm.heartRateBpm.collectAsStateWithLifecycle()
+    val heartRateStatus by vm.heartRateStatus.collectAsStateWithLifecycle()
+    val heartRateDeviceName by vm.heartRateDeviceName.collectAsStateWithLifecycle()
+    val heartRateRecorded by vm.heartRateRecorded.collectAsStateWithLifecycle()
 
     var showFinishConfirm by remember { mutableStateOf(false) }
     var showExitConfirm by remember { mutableStateOf(false) }
@@ -146,12 +154,28 @@ fun WorkoutScreen(onFinish: () -> Unit, onExit: () -> Unit) {
             )
         }
     ) { padding ->
-        BoxWithConstraints(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            when (phase) {
+            HeartRateWidget(
+                bpm = heartRateBpm,
+                status = heartRateStatus,
+                deviceName = heartRateDeviceName,
+                recordedCount = heartRateRecorded,
+                onConnect = vm::connectHeartRate,
+                onDisconnect = vm::disconnectHeartRate,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+            BoxWithConstraints(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .weight(1f)
+            ) {
+                when (phase) {
                 WorkoutPhase.SETUP -> {
                     WorkoutSetupContent(
                         exercise = currentExercise,
@@ -161,7 +185,8 @@ fun WorkoutScreen(onFinish: () -> Unit, onExit: () -> Unit) {
                         onSelectExercise = vm::selectExercise,
                         onWeightChange = { vm.updateSetupWeight(currentExercise?.id ?: -1L, it) },
                         onRepsChange = { vm.updateSetupReps(currentExercise?.id ?: -1L, it) },
-                        onStart = vm::startTraining
+                        onStart = vm::startTraining,
+                        onAddNew = { showAddExercise = true }
                     )
                 }
 
@@ -182,9 +207,15 @@ fun WorkoutScreen(onFinish: () -> Unit, onExit: () -> Unit) {
 
                 WorkoutPhase.REST -> {
                     val entryEx = allExercises.firstOrNull { it.id == entryExerciseId }
+                    val entrySetNum = vm.nextSetNumber(entryExerciseId)
                     WorkoutRestContent(
                         entryExercise = entryEx,
-                        entrySetNumber = vm.nextSetNumber(entryExerciseId),
+                        entrySetNumber = entrySetNum,
+                        currentSetNumber = if (currentExercise?.id == entryExerciseId) {
+                            entrySetNum + 1
+                        } else {
+                            vm.nextSetNumber(currentExercise?.id)
+                        },
                         currentExercise = currentExercise,
                         allExercises = allExercises,
                         entryWeight = entryWeight,
@@ -205,6 +236,7 @@ fun WorkoutScreen(onFinish: () -> Unit, onExit: () -> Unit) {
                     )
                 }
             }
+        }
         }
     }
 
@@ -313,6 +345,7 @@ private fun WorkoutSetupContent(
     onSelectExercise: (Exercise) -> Unit,
     onWeightChange: (String) -> Unit,
     onRepsChange: (String) -> Unit,
+    onAddNew: () -> Unit,
     onStart: () -> Unit
 ) {
     Column(
@@ -330,7 +363,8 @@ private fun WorkoutSetupContent(
         ExerciseDropdown(
             exercises = allExercises,
             selected = exercise,
-            onSelect = onSelectExercise
+            onSelect = onSelectExercise,
+            onAddNew = onAddNew
         )
 
         Card(modifier = Modifier.fillMaxWidth()) {
@@ -350,6 +384,7 @@ private fun WorkoutSetupContent(
                         value = weight,
                         onValueChange = { onWeightChange(it.filter { c -> c.isDigit() || c == '.' || c == ',' }) },
                         label = { Text("Вес, кг") },
+                        placeholder = { Text("0") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         modifier = Modifier.weight(1f)
@@ -358,6 +393,7 @@ private fun WorkoutSetupContent(
                         value = reps,
                         onValueChange = { onRepsChange(it.filter(Char::isDigit).take(3)) },
                         label = { Text("Повторения") },
+                        placeholder = { Text("10") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         modifier = Modifier.weight(1f)
@@ -370,7 +406,7 @@ private fun WorkoutSetupContent(
 
         Button(
             onClick = onStart,
-            enabled = exercise != null && weight.isNotBlank() && reps.isNotBlank(),
+            enabled = exercise != null,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(56.dp)
@@ -453,6 +489,7 @@ private fun WorkoutExerciseContent(
 private fun WorkoutRestContent(
     entryExercise: Exercise?,
     entrySetNumber: Int,
+    currentSetNumber: Int,
     currentExercise: Exercise?,
     allExercises: List<Exercise>,
     entryWeight: String,
@@ -492,6 +529,32 @@ private fun WorkoutRestContent(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        if (!showEntries) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                entryExercise?.let { ex ->
+                    Text(
+                        "Выполнено: ${ex.name} · подход $entrySetNumber · ${entryWeight.ifBlank { "-" }} кг · ${entryReps.ifBlank { "-" }} повт",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                currentExercise?.let { ex ->
+                    Text(
+                        "Новый подход: ${ex.name} · подход $currentSetNumber · ${currentWeight.ifBlank { "-" }} кг · ${currentReps.ifBlank { "-" }} повт",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
         if (showEntries) {
             Column(
                 modifier = Modifier
@@ -512,6 +575,7 @@ private fun WorkoutRestContent(
                                     value = entryWeight,
                                     onValueChange = { onEntryWeightChange(it.filter { c -> c.isDigit() || c == '.' || c == ',' }) },
                                     label = { Text("Вес, кг") },
+                                    placeholder = { Text("0") },
                                     singleLine = true,
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                     modifier = Modifier.weight(1f)
@@ -520,6 +584,7 @@ private fun WorkoutRestContent(
                                     value = entryReps,
                                     onValueChange = { onEntryRepsChange(it.filter(Char::isDigit).take(3)) },
                                     label = { Text("Повторения") },
+                                    placeholder = { Text("10") },
                                     singleLine = true,
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                     modifier = Modifier.weight(1f)
@@ -537,7 +602,8 @@ private fun WorkoutRestContent(
                 ExerciseDropdown(
                     exercises = allExercises,
                     selected = currentExercise,
-                    onSelect = onSelectCurrent
+                    onSelect = onSelectCurrent,
+                    onAddNew = onAddExercise
                 )
                 TextButton(
                     onClick = onAddExercise,
@@ -558,6 +624,7 @@ private fun WorkoutRestContent(
                                 value = currentWeight,
                                 onValueChange = { onCurrentWeightChange(it.filter { c -> c.isDigit() || c == '.' || c == ',' }) },
                                 label = { Text("Вес, кг") },
+                                placeholder = { Text("0") },
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 modifier = Modifier.weight(1f)
@@ -566,6 +633,7 @@ private fun WorkoutRestContent(
                                 value = currentReps,
                                 onValueChange = { onCurrentRepsChange(it.filter(Char::isDigit).take(3)) },
                                 label = { Text("Повторения") },
+                                placeholder = { Text("10") },
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 modifier = Modifier.weight(1f)
@@ -637,40 +705,79 @@ private fun WorkoutRestContent(
 private fun ExerciseDropdown(
     exercises: List<Exercise>,
     selected: Exercise?,
-    onSelect: (Exercise) -> Unit
+    onSelect: (Exercise) -> Unit,
+    onAddNew: () -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+
+    val displayValue = if (query.isNotBlank()) query else selected?.name.orEmpty()
 
     ExposedDropdownMenuBox(
         expanded = expanded,
-        onExpandedChange = { expanded = it }
+        onExpandedChange = { newExpanded ->
+            expanded = newExpanded
+            if (!newExpanded) query = ""
+        }
     ) {
         OutlinedTextField(
-            value = selected?.name.orEmpty(),
-            onValueChange = {},
-            readOnly = true,
+            value = displayValue,
+            onValueChange = {
+                query = it
+                if (!expanded) expanded = true
+            },
             label = { Text("Упражнение") },
+            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = "Поиск") },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            singleLine = true,
             modifier = Modifier
-                .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                .menuAnchor(MenuAnchorType.PrimaryEditable)
                 .fillMaxWidth()
         )
         ExposedDropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false }
         ) {
+            DropdownMenuItem(
+                leadingIcon = { Icon(Icons.Filled.Add, contentDescription = null) },
+                text = { Text("Новое упражнение") },
+                onClick = {
+                    query = ""
+                    expanded = false
+                    onAddNew()
+                }
+            )
+
+            HorizontalDivider()
+
+            val trimmed = query.trim()
+            val filtered = if (trimmed.isEmpty()) {
+                exercises
+            } else {
+                exercises.filter { ex ->
+                    ex.name.contains(trimmed, ignoreCase = true) ||
+                        ex.muscleGroup.contains(trimmed, ignoreCase = true)
+                }
+            }
+
             if (exercises.isEmpty()) {
                 DropdownMenuItem(
                     text = { Text("В библиотеке нет упражнений") },
-                    onClick = { expanded = false }
+                    onClick = {}
+                )
+            } else if (filtered.isEmpty()) {
+                DropdownMenuItem(
+                    text = { Text("Ничего не найдено") },
+                    onClick = {}
                 )
             } else {
-                exercises.forEach { ex ->
+                filtered.forEach { ex ->
                     DropdownMenuItem(
                         text = { Text(ex.name) },
                         onClick = {
-                            onSelect(ex)
+                            query = ""
                             expanded = false
+                            onSelect(ex)
                         }
                     )
                 }

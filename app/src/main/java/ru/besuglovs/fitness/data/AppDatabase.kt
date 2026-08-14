@@ -12,9 +12,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         Exercise::class,
         Workout::class,
         WorkoutExercise::class,
-        SetEntry::class
+        SetEntry::class,
+        HeartRateSample::class
     ],
-    version = 6,
+    version = 8,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -22,6 +23,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun exerciseDao(): ExerciseDao
     abstract fun workoutDao(): WorkoutDao
     abstract fun statsDao(): StatsDao
+    abstract fun heartRateDao(): HeartRateDao
 
     companion object {
         @Volatile
@@ -79,6 +81,32 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `heart_rate_samples` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`workoutId` INTEGER NOT NULL, " +
+                        "`timestamp` INTEGER NOT NULL, " +
+                        "`bpm` INTEGER NOT NULL, " +
+                        "FOREIGN KEY(`workoutId`) REFERENCES `workouts`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_heart_rate_samples_workoutId` " +
+                        "ON `heart_rate_samples`(`workoutId`)"
+                )
+            }
+        }
+
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `set_entries` ADD COLUMN `setStartTime` INTEGER")
+                db.execSQL("ALTER TABLE `set_entries` ADD COLUMN `avgHeartRate` INTEGER")
+                db.execSQL("ALTER TABLE `set_entries` ADD COLUMN `maxHeartRate` INTEGER")
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -86,7 +114,14 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "fitness.db"
                 )
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                    .addMigrations(
+                        MIGRATION_2_3,
+                        MIGRATION_3_4,
+                        MIGRATION_4_5,
+                        MIGRATION_5_6,
+                        MIGRATION_6_7,
+                        MIGRATION_7_8
+                    )
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }

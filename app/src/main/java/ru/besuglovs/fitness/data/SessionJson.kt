@@ -74,3 +74,25 @@ internal fun decodeLongArray(arr: JSONArray?): List<Long> {
     if (arr == null) return emptyList()
     return (0 until arr.length()).map { arr.getLong(it) }
 }
+
+internal fun encodeLongListMap(map: Map<Long, List<Long>>): JSONObject {
+    val obj = JSONObject()
+    map.forEach { (k, v) ->
+        val arr = JSONArray()
+        v.forEach { arr.put(it) }
+        obj.put(k.toString(), arr)
+    }
+    return obj
+}
+
+internal fun decodeLongListMap(obj: JSONObject?): Map<Long, MutableList<Long>> {
+    if (obj == null) return emptyMap()
+    val out = mutableMapOf<Long, MutableList<Long>>()
+    for (key in obj.keys()) {
+        val arr = obj.optJSONArray(key) ?: continue
+        out[key.toLong()] = mutableListOf<Long>().apply {
+            for (i in 0 until arr.length()) add(arr.getLong(i))
+        }
+    }
+    return out
+}
