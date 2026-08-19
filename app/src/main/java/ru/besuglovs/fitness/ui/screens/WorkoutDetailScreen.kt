@@ -45,6 +45,7 @@ import ru.besuglovs.fitness.data.HeartRateSample
 import ru.besuglovs.fitness.data.WorkoutWithDetails
 import ru.besuglovs.fitness.data.WorkoutExerciseWithExercise
 import ru.besuglovs.fitness.ui.AppViewModelProvider
+import ru.besuglovs.fitness.ui.components.ChartZone
 import ru.besuglovs.fitness.ui.components.LineChart
 import ru.besuglovs.fitness.ui.viewmodel.WorkoutDetailViewModel
 import ru.besuglovs.fitness.util.formatDateTime
@@ -213,16 +214,102 @@ private fun samplesForSet(
     return samples.filter { it.timestamp in start..end }
 }
 
-private fun samplesForCircle(
+private data class HrPhase(
+    val samples: List<HeartRateSample>,
+    val isRest: Boolean
+)
+
+private fun restSamplesForSet(
+    samples: List<HeartRateSample>,
+    set: SetEntry,
+    nextSetStart: Long? = null
+): List<HeartRateSample> {
+    val restSec = set.restSeconds ?: return emptyList()
+    val start = set.doneAt
+    if (start <= 0L) return emptyList()
+    var end = start + restSec * 1000L
+    if (nextSetStart != null && nextSetStart > start) end = minOf(end, nextSetStart)
+    if (end <= start) return emptyList()
+    return samples.filter { it.timestamp in start..end }
+}
+
+private fun buildSetPhases(
+    samples: List<HeartRateSample>,
+    set: SetEntry,
+    nextSetStart: Long? = null
+): List<HrPhase> {
+    val phases = mutableListOf(HrPhase(samplesForSet(samples, set), isRest = false))
+    val rest = restSamplesForSet(samples, set, nextSetStart)
+    if (set.restSeconds != null || rest.isNotEmpty()) {
+        phases.add(HrPhase(rest, isRest = true))
+    }
+    return phases
+}
+
+private fun buildCirclePhases(
     samples: List<HeartRateSample>,
     circleSets: List<SetEntry>
-): List<HeartRateSample> {
-    val starts = circleSets.mapNotNull { it.setStartTime }
-    if (starts.isEmpty()) return emptyList()
-    val start = starts.minOrNull() ?: return emptyList()
-    val end = circleSets.maxOf { it.doneAt }
-    if (end < start) return emptyList()
-    return samples.filter { it.timestamp in start..end }
+): List<HrPhase> {
+    val ordered = circleSets.sortedBy { it.doneAt }
+    val phases = mutableListOf<HrPhase>()
+    ordered.forEachIndexed { i, set ->
+        val nextStart = ordered.getOrNull(i + 1)?.setStartTime
+        phases.addAll(buildSetPhases(samples, set, nextStart))
+    }
+    return phases
+}
+
+private data class HrChartData(
+    val values: List<Float>,
+    val labels: List<String>,
+    val zones: List<ChartZone>
+)
+
+private fun downsampleWithBase(
+    samples: List<HeartRateSample>,
+    base: Long,
+    maxPoints: Int = 8
+): Pair<List<Float>, List<String>> {
+    if (samples.isEmpty()) return emptyList<Float>() to emptyList()
+    val step = kotlin.math.ceil(samples.size.toDouble() / maxPoints).toInt().coerceAtLeast(1)
+    val indices = samples.indices step step
+    val values = indices.map { samples[it].bpm.toFloat() }
+    val labels = indices.map {
+        val sec = (samples[it].timestamp - base) / 1000
+        val m = sec / 60
+        val s = sec % 60
+        if (m > 0) "${m}м${s.toString().padStart(2, '0')}" else "${s}с"
+    }
+    return values to labels
+}
+
+private fun buildChartData(
+    phases: List<HrPhase>,
+    setColor: androidx.compose.ui.graphics.Color,
+    restColor: androidx.compose.ui.graphics.Color
+): HrChartData {
+    val base = phases.firstNotNullOfOrNull { it.samples.firstOrNull()?.timestamp }
+        ?: return HrChartData(emptyList(), emptyList(), emptyList())
+    var offset = 0
+    val values = mutableListOf<Float>()
+    val labels = mutableListOf<String>()
+    val zones = mutableListOf<ChartZone>()
+    phases.forEach { phase ->
+        val (vals, lbls) = downsampleWithBase(phase.samples, base)
+        if (vals.isEmpty()) return@forEach
+        values.addAll(vals)
+        labels.addAll(lbls)
+        zones.add(
+            ChartZone(
+                startIndex = offset,
+                endIndex = offset + vals.size,
+                color = if (phase.isRest) restColor else setColor,
+                label = if (phase.isRest) "Отдых" else "Подход"
+            )
+        )
+        offset += vals.size
+    }
+    return HrChartData(values, labels, zones)
 }
 
 private fun heartRateLabel(set: SetEntry): String =
@@ -235,10 +322,11 @@ private fun heartRateLabel(set: SetEntry): String =
 @Composable
 private fun HeartRateSection(
     label: String,
-    samples: List<HeartRateSample>,
+    phases: List<HrPhase>,
     modifier: Modifier = Modifier
 ) {
-    if (samples.isEmpty()) {
+    val allSamples = phases.flatMap { it.samples }
+    if (allSamples.isEmpty()) {
         Text(
             "Нет данных о пульсе",
             style = MaterialTheme.typography.labelMedium,
@@ -247,10 +335,12 @@ private fun HeartRateSection(
         )
         return
     }
-    val (values, labels) = remember(samples) { downsampleHeartRate(samples) }
-    val min = samples.minOf { it.bpm }
-    val max = samples.maxOf { it.bpm }
-    val avg = samples.map { it.bpm }.average().toInt()
+    val setColor = MaterialTheme.colorScheme.primary
+    val restColor = MaterialTheme.colorScheme.tertiary
+    val chartData = remember(phases, setColor, restColor) { buildChartData(phases, setColor, restColor) }
+    val min = allSamples.minOf { it.bpm }
+    val max = allSamples.maxOf { it.bpm }
+    val avg = allSamples.map { it.bpm }.average().toInt()
     Column(modifier = modifier.fillMaxWidth()) {
         Text(
             "$label · ср $avg · мин $min · макс $max уд/мин",
@@ -258,7 +348,11 @@ private fun HeartRateSection(
             color = MaterialTheme.colorScheme.primary
         )
         Spacer(Modifier.height(4.dp))
-        LineChart(values = values, xLabels = labels)
+        LineChart(
+            values = chartData.values,
+            xLabels = chartData.labels,
+            zones = chartData.zones
+        )
     }
 }
 
@@ -304,6 +398,12 @@ private fun CircuitDetailList(
             for (circle in 1..maxCircles) {
                 item {
                     CircuitCircleCard(circleNumber = circle, exercises = exercises, heartRateSamples = heartRateSamples)
+                }
+                val restSeconds = interRoundRestSeconds(exercises, circle)
+                if (restSeconds != null) {
+                    item {
+                        CircuitRoundRestBlock(restSeconds = restSeconds)
+                    }
                 }
             }
         } else {
@@ -472,7 +572,7 @@ private fun CircuitExerciseCardRow(
             Spacer(Modifier.height(6.dp))
             HeartRateSection(
                 label = "Пульс подхода $circleNumber",
-                samples = samplesForSet(heartRateSamples, set)
+                phases = buildSetPhases(heartRateSamples, set)
             )
         }
     }
@@ -486,6 +586,11 @@ private fun CircuitCircleCard(
 ) {
     var circleExpanded by rememberSaveable { mutableStateOf(false) }
     var expandedKey by rememberSaveable { mutableStateOf<String?>(null) }
+    val circleSets = remember(exercises, circleNumber) {
+        exercises.mapNotNull { we -> we.sets.firstOrNull { it.setNumber == circleNumber } }
+    }
+    val circleDuration = remember(circleSets) { circleDurationSeconds(circleSets) }
+    val lastDoneAt = circleSets.maxOfOrNull { it.doneAt }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(
@@ -501,12 +606,18 @@ private fun CircuitCircleCard(
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.weight(1f)
                 )
+                Text(
+                    circleDuration?.let { formatTimer(it.toLong()) } ?: "-",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
             if (circleExpanded) {
                 Spacer(Modifier.height(8.dp))
                 HeartRateSection(
                     label = "Пульс круга $circleNumber",
-                    samples = samplesForCircle(
+                    phases = buildCirclePhases(
                         heartRateSamples,
                         exercises.mapNotNull { we ->
                             we.sets.firstOrNull { it.setNumber == circleNumber }
@@ -567,6 +678,7 @@ private fun CircuitCircleCard(
                         we = we,
                         set = set,
                         heartRateSamples = heartRateSamples,
+                        isLastInCircle = set.doneAt == lastDoneAt,
                         expanded = expandedKey == key,
                         onToggle = { expandedKey = if (expandedKey == key) null else key }
                     )
@@ -580,6 +692,7 @@ private fun CircuitExerciseRow(
     we: WorkoutExerciseWithExercise,
     set: SetEntry,
     heartRateSamples: List<HeartRateSample>,
+    isLastInCircle: Boolean,
     expanded: Boolean,
     onToggle: () -> Unit
 ) {
@@ -623,7 +736,8 @@ private fun CircuitExerciseRow(
                 textAlign = TextAlign.End
             )
             Text(
-                set.restSeconds?.let { "${it / 60}:${"%02d".format(it % 60)}" } ?: "-",
+                if (isLastInCircle) "-"
+                else (set.restSeconds?.let { "${it / 60}:${"%02d".format(it % 60)}" } ?: "-"),
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.weight(1f),
                 textAlign = TextAlign.End
@@ -633,7 +747,60 @@ private fun CircuitExerciseRow(
             Spacer(Modifier.height(6.dp))
             HeartRateSection(
                 label = "Пульс подхода ${set.setNumber}",
-                samples = samplesForSet(heartRateSamples, set)
+                phases = buildSetPhases(heartRateSamples, set)
+            )
+        }
+    }
+}
+
+private fun circleSets(
+    exercises: List<WorkoutExerciseWithExercise>,
+    circleNumber: Int
+): List<SetEntry> =
+    exercises.mapNotNull { we -> we.sets.firstOrNull { it.setNumber == circleNumber } }
+
+private fun circleDurationSeconds(sets: List<SetEntry>): Int? {
+    if (sets.isEmpty()) return null
+    val end = sets.maxOfOrNull { it.doneAt } ?: return null
+    val start = sets.mapNotNull { it.setStartTime }.minOrNull()
+    if (start == null || end <= start) return null
+    return ((end - start) / 1000).toInt().coerceAtLeast(0)
+}
+
+private fun interRoundRestSeconds(
+    exercises: List<WorkoutExerciseWithExercise>,
+    circleNumber: Int
+): Int? {
+    val sets = circleSets(exercises, circleNumber)
+    if (sets.isEmpty()) return null
+    return sets.maxByOrNull { it.doneAt }?.restSeconds
+}
+
+@Composable
+private fun CircuitRoundRestBlock(restSeconds: Int?) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Отдых между кругами",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                restSeconds?.let { "${it / 60}:${"%02d".format(it % 60)}" } ?: "-",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
             )
         }
     }
@@ -802,7 +969,7 @@ private fun SetDetailRow(
             Spacer(Modifier.height(6.dp))
             HeartRateSection(
                 label = "Пульс подхода ${set.setNumber}",
-                samples = samplesForSet(heartRateSamples, set)
+                phases = buildSetPhases(heartRateSamples, set)
             )
         }
     }
