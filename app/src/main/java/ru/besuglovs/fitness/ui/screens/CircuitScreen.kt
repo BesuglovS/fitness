@@ -35,6 +35,8 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DragHandle
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -83,13 +85,17 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlin.math.PI
+import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import ru.besuglovs.fitness.data.Exercise
+import ru.besuglovs.fitness.data.HeartRateSample
 import ru.besuglovs.fitness.ui.AppViewModelProvider
 import ru.besuglovs.fitness.ui.components.HeartRateWidget
+import ru.besuglovs.fitness.ui.components.LineChart
 import ru.besuglovs.fitness.ui.viewmodel.CircuitPhase
 import ru.besuglovs.fitness.ui.viewmodel.CircuitViewModel
+import ru.besuglovs.fitness.ui.viewmodel.RoundHrData
 import ru.besuglovs.fitness.util.formatGap
 import ru.besuglovs.fitness.util.formatTimer
 import ru.besuglovs.fitness.util.weightLabel
@@ -131,6 +137,7 @@ fun CircuitScreen(onFinish: () -> Unit, onExit: () -> Unit) {
     val heartRateDeviceName by vm.heartRateDeviceName.collectAsStateWithLifecycle()
     val heartRateRecorded by vm.heartRateRecorded.collectAsStateWithLifecycle()
     val heartRateDevices by vm.heartRateDevices.collectAsStateWithLifecycle()
+    val currentRoundHr by vm.currentRoundHr.collectAsStateWithLifecycle()
 
     var showFinishConfirm by remember { mutableStateOf(false) }
     var showExitConfirm by remember { mutableStateOf(false) }
@@ -245,6 +252,7 @@ fun CircuitScreen(onFinish: () -> Unit, onExit: () -> Unit) {
                         entryReps = entryReps,
                         roundDurations = roundDurations,
                         setDurations = setDurations,
+                        roundHr = currentRoundHr,
                         restElapsed = restElapsed,
                         restLimit = vm.restLimitSeconds,
                         restPaused = vm.restPaused.collectAsStateWithLifecycle().value,
@@ -918,6 +926,7 @@ private fun CircuitEntryContent(
     entryReps: Map<Long, String>,
     roundDurations: List<Int>,
     setDurations: Map<Long, List<Int>>,
+    roundHr: RoundHrData?,
     restElapsed: Long,
     restLimit: Int,
     restPaused: Boolean,
@@ -964,6 +973,23 @@ private fun CircuitEntryContent(
             )
         }
 
+        roundHr?.circleSamples?.let { circleSamples ->
+            if (circleSamples.isNotEmpty()) {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp)
+                    ) {
+                        RoundHrChart(
+                            label = "Пульс круга ${roundHr.circleNumber}",
+                            samples = circleSamples
+                        )
+                    }
+                }
+            }
+        }
+
         if (showEntries) {
             Column(
                 modifier = Modifier
@@ -971,6 +997,7 @@ private fun CircuitEntryContent(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                var expandedHrExercise by remember { mutableStateOf<Long?>(null) }
                 exercises.forEach { ex ->
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Column(
@@ -978,11 +1005,40 @@ private fun CircuitEntryContent(
                                 .fillMaxWidth()
                                 .padding(12.dp)
                         ) {
-                            Text(
-                                ex.name,
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Medium
-                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        expandedHrExercise = if (expandedHrExercise == ex.id) null else ex.id
+                                    },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    ex.name,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Icon(
+                                    if (expandedHrExercise == ex.id) {
+                                        Icons.Filled.KeyboardArrowUp
+                                    } else {
+                                        Icons.Filled.KeyboardArrowDown
+                                    },
+                                    contentDescription = "График пульса",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            if (expandedHrExercise == ex.id) {
+                                Spacer(Modifier.height(8.dp))
+                                RoundHrChart(
+                                    label = "Пульс упражнения",
+                                    samples = roundHr?.exercises
+                                        ?.firstOrNull { it.exerciseId == ex.id }
+                                        ?.samples.orEmpty()
+                                )
+                                Spacer(Modifier.height(8.dp))
+                            }
                             val exerciseTimes = setDurations[ex.id].orEmpty()
                             if (exerciseTimes.isNotEmpty()) {
                                 Spacer(Modifier.height(2.dp))
@@ -1066,6 +1122,51 @@ private fun CircuitEntryContent(
             }
         }
     }
+}
+
+@Composable
+private fun RoundHrChart(
+    label: String,
+    samples: List<HeartRateSample>,
+    modifier: Modifier = Modifier
+) {
+    if (samples.isEmpty()) {
+        Text(
+            "Нет данных о пульсе",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = modifier
+        )
+        return
+    }
+    val min = samples.minOf { it.bpm }
+    val max = samples.maxOf { it.bpm }
+    val avg = samples.map { it.bpm }.average().toInt()
+    val chart = remember(samples) { hrChartData(samples) }
+    Column(modifier = modifier.fillMaxWidth()) {
+        Text(
+            "$label · ср $avg · мин $min · макс $max уд/мин",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Spacer(Modifier.height(4.dp))
+        LineChart(values = chart.first, xLabels = chart.second)
+    }
+}
+
+private fun hrChartData(samples: List<HeartRateSample>): Pair<List<Float>, List<String>> {
+    if (samples.isEmpty()) return emptyList<Float>() to emptyList()
+    val base = samples.first().timestamp
+    val step = ceil(samples.size.toDouble() / 8.0).toInt().coerceAtLeast(1)
+    val indices = samples.indices step step
+    val values = indices.map { samples[it].bpm.toFloat() }
+    val labels = indices.map {
+        val sec = (samples[it].timestamp - base) / 1000
+        val m = sec / 60
+        val s = sec % 60
+        if (m > 0) "${m}м${s.toString().padStart(2, '0')}" else "${s}с"
+    }
+    return values to labels
 }
 
 @Composable
