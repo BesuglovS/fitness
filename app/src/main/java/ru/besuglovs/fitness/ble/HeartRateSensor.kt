@@ -28,7 +28,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
-enum class HeartRateStatus { DISCONNECTED, SCANNING, CONNECTING, CONNECTED }
+enum class HeartRateStatus { DISCONNECTED, LOST, SCANNING, CONNECTING, CONNECTED }
 
 data class ScannedDevice(
     val address: String,
@@ -69,6 +69,9 @@ class HeartRateSensor(context: Context) {
 
     @Volatile
     private var wasConnected = false
+
+    @Volatile
+    private var everConnected = false
 
     private var gatt: BluetoothGatt? = null
     private var scanCallback: ScanCallback? = null
@@ -125,6 +128,7 @@ class HeartRateSensor(context: Context) {
         stopScan()
         autoReconnectInProgress = false
         wasConnected = false
+        everConnected = false
         gatt?.disconnect()
         gatt?.close()
         gatt = null
@@ -204,6 +208,7 @@ class HeartRateSensor(context: Context) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     wasConnected = true
                     autoReconnectInProgress = false
+                    everConnected = true
                     gatt.discoverServices()
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
@@ -214,10 +219,16 @@ class HeartRateSensor(context: Context) {
                     wasConnected = false
                     _bpm.value = null
                     if (failedReconnect) {
+                        everConnected = false
                         prefs.edit().remove(KEY_LAST_MAC).apply()
                         startScan()
                     } else {
-                        _status.value = HeartRateStatus.DISCONNECTED
+                        _status.value = if (everConnected) {
+                            HeartRateStatus.LOST
+                        } else {
+                            HeartRateStatus.DISCONNECTED
+                        }
+                        everConnected = false
                     }
                 }
             }
