@@ -72,6 +72,10 @@ fun HomeScreen(
     var pendingMode by remember { mutableStateOf("normal") }
     var showDiscardConfirm by remember { mutableStateOf(false) }
 
+    LaunchedEffect(Unit) {
+        vm.refreshDefaultRest()
+    }
+
     LaunchedEffect(createdId) {
         createdId?.let { id ->
             vm.onWorkoutOpened()
@@ -102,6 +106,7 @@ fun HomeScreen(
                         pendingRestSeconds = defaultRest
                         showRestDialog = true
                     },
+                    enabled = unfinished == null,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(56.dp)
@@ -119,6 +124,7 @@ fun HomeScreen(
                         pendingRestSeconds = defaultRest
                         showRestDialog = true
                     },
+                    enabled = unfinished == null,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(56.dp)
@@ -126,6 +132,16 @@ fun HomeScreen(
                     Icon(Icons.Filled.Repeat, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("Круговая тренировка", style = MaterialTheme.typography.titleMedium)
+                }
+            }
+
+            if (unfinished != null) {
+                item {
+                    Text(
+                        "Сначала завершите или удалите текущую тренировку.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
 

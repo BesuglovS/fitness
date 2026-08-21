@@ -35,7 +35,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import ru.besuglovs.fitness.ui.AppViewModelProvider
 import ru.besuglovs.fitness.ui.components.LineChart
 import ru.besuglovs.fitness.ui.viewmodel.ProgressViewModel
-import ru.besuglovs.fitness.util.epley1rm
 import ru.besuglovs.fitness.util.formatShortDate
 import ru.besuglovs.fitness.util.weightLabel
 
@@ -46,17 +45,12 @@ fun ProgressScreen() {
     val exercises by vm.exercises.collectAsStateWithLifecycle()
     val progression by vm.progression.collectAsStateWithLifecycle()
     val maxWeight by vm.maxWeight.collectAsStateWithLifecycle()
+    val best1rm by vm.best1RM.collectAsStateWithLifecycle()
     val totalWorkouts by vm.totalWorkouts.collectAsStateWithLifecycle()
     val selectedId by vm.selectedExerciseId.collectAsStateWithLifecycle()
     val selected = exercises.firstOrNull { it.id == selectedId } ?: exercises.firstOrNull()
 
     var menuExpanded by remember { mutableStateOf(false) }
-
-    val best1rm = progression.mapNotNull { p ->
-        val w = p.maxWeight
-        val r = p.maxReps
-        if (w != null && r != null) epley1rm(w, r) else null
-    }.maxOrNull()
 
     Scaffold(
         topBar = { TopAppBar(title = { Text("Прогресс") }) }

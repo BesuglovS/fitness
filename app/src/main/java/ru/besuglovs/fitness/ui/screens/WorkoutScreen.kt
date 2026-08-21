@@ -26,6 +26,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -69,8 +71,14 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlin.math.PI
 import kotlin.math.cos
 import ru.besuglovs.fitness.data.Exercise
+import ru.besuglovs.fitness.data.HeartRateSample
+import ru.besuglovs.fitness.data.SetEntry
 import ru.besuglovs.fitness.ui.AppViewModelProvider
+import ru.besuglovs.fitness.ui.screens.buildExercisePhases
+import ru.besuglovs.fitness.ui.screens.HeartRateSection
+import ru.besuglovs.fitness.ui.viewmodel.WorkoutRecordedSet
 import ru.besuglovs.fitness.ui.components.HeartRateWidget
+import ru.besuglovs.fitness.ui.components.KeepScreenOn
 import ru.besuglovs.fitness.ui.viewmodel.WorkoutPhase
 import ru.besuglovs.fitness.ui.viewmodel.WorkoutViewModel
 import ru.besuglovs.fitness.util.formatGap
@@ -95,6 +103,7 @@ fun WorkoutScreen(onFinish: () -> Unit, onExit: () -> Unit) {
     val setPaused by vm.setPaused.collectAsStateWithLifecycle()
     val pauseElapsed by vm.pauseElapsed.collectAsStateWithLifecycle()
     val restElapsed by vm.restElapsed.collectAsStateWithLifecycle()
+    val restPaused by vm.restPaused.collectAsStateWithLifecycle()
     val entryWeight by vm.entryWeight.collectAsStateWithLifecycle()
     val entryReps by vm.entryReps.collectAsStateWithLifecycle()
     val entryExerciseId by vm.entryExerciseId.collectAsStateWithLifecycle()
@@ -106,10 +115,15 @@ fun WorkoutScreen(onFinish: () -> Unit, onExit: () -> Unit) {
     val heartRateDeviceName by vm.heartRateDeviceName.collectAsStateWithLifecycle()
     val heartRateRecorded by vm.heartRateRecorded.collectAsStateWithLifecycle()
     val heartRateDevices by vm.heartRateDevices.collectAsStateWithLifecycle()
+    val completedSets by vm.completedSets.collectAsStateWithLifecycle()
+    val heartRateSamples by vm.heartRateSamples.collectAsStateWithLifecycle()
+    val pendingEntrySet by vm.pendingEntrySet.collectAsStateWithLifecycle()
 
     var showFinishConfirm by remember { mutableStateOf(false) }
     var showExitConfirm by remember { mutableStateOf(false) }
     var showAddExercise by remember { mutableStateOf(false) }
+
+    KeepScreenOn()
 
     LaunchedEffect(saved) {
         if (saved) onFinish()
@@ -215,6 +229,7 @@ fun WorkoutScreen(onFinish: () -> Unit, onExit: () -> Unit) {
                     val entrySetNum = vm.nextSetNumber(entryExerciseId)
                     WorkoutRestContent(
                         entryExercise = entryEx,
+                        entryExerciseId = entryExerciseId,
                         entrySetNumber = entrySetNum,
                         currentSetNumber = if (currentExercise?.id == entryExerciseId) {
                             entrySetNum + 1
@@ -229,6 +244,7 @@ fun WorkoutScreen(onFinish: () -> Unit, onExit: () -> Unit) {
                         currentWeight = setupWeights[currentExercise?.id].orEmpty(),
                         currentReps = setupReps[currentExercise?.id].orEmpty(),
                         restElapsed = restElapsed,
+                        restPaused = restPaused,
                         restLimit = vm.restLimitSeconds,
                         onEntryWeightChange = vm::updateEntryWeight,
                         onEntryRepsChange = vm::updateEntryReps,
@@ -237,7 +253,10 @@ fun WorkoutScreen(onFinish: () -> Unit, onExit: () -> Unit) {
                         onCurrentRepsChange = { vm.updateSetupReps(currentExercise?.id ?: -1L, it) },
                         onNext = vm::nextApproach,
                         onFinish = { showFinishConfirm = true },
-                        onAddExercise = { showAddExercise = true }
+                        onAddExercise = { showAddExercise = true },
+                        completedSets = completedSets,
+                        heartRateSamples = heartRateSamples,
+                        pendingEntrySet = pendingEntrySet
                     )
                 }
             }
@@ -493,6 +512,7 @@ private fun WorkoutExerciseContent(
 @Composable
 private fun WorkoutRestContent(
     entryExercise: Exercise?,
+    entryExerciseId: Long?,
     entrySetNumber: Int,
     currentSetNumber: Int,
     currentExercise: Exercise?,
@@ -503,6 +523,7 @@ private fun WorkoutRestContent(
     currentWeight: String,
     currentReps: String,
     restElapsed: Long,
+    restPaused: Boolean,
     restLimit: Int,
     onEntryWeightChange: (String) -> Unit,
     onEntryRepsChange: (String) -> Unit,
@@ -511,7 +532,10 @@ private fun WorkoutRestContent(
     onCurrentRepsChange: (String) -> Unit,
     onNext: () -> Unit,
     onFinish: () -> Unit,
-    onAddExercise: () -> Unit
+    onAddExercise: () -> Unit,
+    completedSets: Map<Long, List<WorkoutRecordedSet>>,
+    heartRateSamples: List<HeartRateSample>,
+    pendingEntrySet: WorkoutRecordedSet?
 ) {
     val overdue = restElapsed > restLimit
     val blinkTransition = rememberInfiniteTransition(label = "restBlink")
@@ -525,8 +549,55 @@ private fun WorkoutRestContent(
         label = "restBlinkProgress"
     )
     val blinkValue = (1f - cos(blinkProgress * (2f * PI.toFloat()))) / 2f
-    val valueAlpha = if (overdue) 0.15f + 0.85f * blinkValue else 1f
+    val valueAlpha = if (overdue && !restPaused) 0.15f + 0.85f * blinkValue else 1f
     var showEntries by remember { mutableStateOf(true) }
+
+    val exerciseNameById = remember(allExercises) { allExercises.associate { it.id to it.name } }
+
+    val orderedExIds = remember(completedSets, entryExerciseId) {
+        val ids = completedSets.keys.toMutableList()
+        if (entryExerciseId != null && !ids.contains(entryExerciseId)) {
+            ids.add(entryExerciseId)
+        }
+        ids
+    }
+
+    var selectedExId by remember { mutableStateOf<Long?>(entryExerciseId) }
+    LaunchedEffect(entryExerciseId) { selectedExId = entryExerciseId }
+
+    val currentIndex = if (selectedExId != null) orderedExIds.indexOf(selectedExId).coerceAtLeast(0) else 0
+    val canPrev = currentIndex > 0
+    val canNext = currentIndex < orderedExIds.size - 1
+
+    val selectedSets = remember(selectedExId, completedSets, pendingEntrySet, entryExerciseId) {
+        val base = (selectedExId?.let { completedSets[it] } ?: emptyList())
+        if (selectedExId != null && selectedExId == entryExerciseId && pendingEntrySet != null) {
+            base + pendingEntrySet
+        } else {
+            base
+        }
+    }
+    val selectedName = selectedExId?.let { exerciseNameById[it] } ?: "Упражнение"
+    val selectedSetEntries = remember(selectedSets) {
+        selectedSets.mapIndexed { i, s ->
+            SetEntry(
+                workoutExerciseId = 0,
+                setNumber = i + 1,
+                weightKg = s.weight,
+                reps = s.reps,
+                restSeconds = s.restSeconds,
+                durationSeconds = s.durationSeconds.takeIf { it > 0 },
+                setStartTime = s.startTime,
+                avgHeartRate = s.avgHeartRate,
+                maxHeartRate = s.maxHeartRate,
+                doneAt = s.doneAt ?: 0L
+            )
+        }
+    }
+    val hrPhases = remember(heartRateSamples, selectedSetEntries) {
+        buildExercisePhases(heartRateSamples, selectedSetEntries)
+    }
+    val hasHrData = hrPhases.any { it.samples.isNotEmpty() }
 
     Column(
         modifier = Modifier
@@ -534,6 +605,51 @@ private fun WorkoutRestContent(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        if (hasHrData) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = { if (canPrev) selectedExId = orderedExIds[currentIndex - 1] },
+                            enabled = canPrev
+                        ) {
+                            Icon(
+                                Icons.Filled.KeyboardArrowLeft,
+                                contentDescription = "Предыдущее упражнение"
+                            )
+                        }
+                        Text(
+                            selectedName,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(
+                            onClick = { if (canNext) selectedExId = orderedExIds[currentIndex + 1] },
+                            enabled = canNext
+                        ) {
+                            Icon(
+                                Icons.Filled.KeyboardArrowRight,
+                                contentDescription = "Следующее упражнение"
+                            )
+                        }
+                    }
+                    HeartRateSection(
+                        label = "Пульс упражнения",
+                        phases = hrPhases
+                    )
+                }
+            }
+        }
+
         if (!showEntries) {
             Column(
                 modifier = Modifier
@@ -649,7 +765,7 @@ private fun WorkoutRestContent(
             }
         }
 
-        val canNext = entryValid && currentExercise != null && currentWeight.isNotBlank() && currentReps.isNotBlank()
+        val canNext = entryValid && currentExercise != null
 
         BigTimer(
             label = "Отдых",

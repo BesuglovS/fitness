@@ -171,24 +171,32 @@ fun LineChart(
                 }
             }
 
-            // x labels
-            val step = if (xLabels.size <= 4) 1 else ((xLabels.size - 1) / 3).coerceAtLeast(1)
+            // x labels: равномерные индексы, выровненные с точками графика
+            val labelIndices = when {
+                xLabels.isEmpty() -> emptyList()
+                xLabels.size <= 4 -> xLabels.indices.toList()
+                else -> listOf(
+                    0,
+                    (xLabels.size - 1) / 3,
+                    (xLabels.size - 1) * 2 / 3,
+                    xLabels.size - 1
+                ).distinct()
+            }
             Row(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .padding(start = 36.dp, end = 8.dp)
-                    .fillMaxWidth()
+                    .fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                var i = 0
-                while (i < xLabels.size) {
+                labelIndices.forEach { i ->
                     Text(
                         text = xLabels[i],
                         style = labelStyle,
                         color = textColor,
                         fontSize = 9.sp,
-                        modifier = Modifier.weight(1f)
+                        maxLines = 1
                     )
-                    i += step
                 }
             }
         }

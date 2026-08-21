@@ -92,6 +92,7 @@ import ru.besuglovs.fitness.data.Exercise
 import ru.besuglovs.fitness.data.HeartRateSample
 import ru.besuglovs.fitness.ui.AppViewModelProvider
 import ru.besuglovs.fitness.ui.components.HeartRateWidget
+import ru.besuglovs.fitness.ui.components.KeepScreenOn
 import ru.besuglovs.fitness.ui.components.LineChart
 import ru.besuglovs.fitness.ui.viewmodel.CircuitPhase
 import ru.besuglovs.fitness.ui.viewmodel.CircuitViewModel
@@ -141,6 +142,8 @@ fun CircuitScreen(onFinish: () -> Unit, onExit: () -> Unit) {
 
     var showFinishConfirm by remember { mutableStateOf(false) }
     var showExitConfirm by remember { mutableStateOf(false) }
+
+    KeepScreenOn()
 
     LaunchedEffect(saved) {
         if (saved) onFinish()

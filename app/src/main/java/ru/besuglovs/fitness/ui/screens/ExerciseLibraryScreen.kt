@@ -62,6 +62,7 @@ private val categories = listOf("Силовая", "Кардио", "Свобод�
 fun ExerciseLibraryScreen(onBack: () -> Unit) {
     val vm: ExerciseLibraryViewModel = viewModel(factory = AppViewModelProvider.Factory)
     val exercises by vm.exercises.collectAsStateWithLifecycle()
+    val deleteError by vm.deleteError.collectAsStateWithLifecycle()
     var editExercise by remember { mutableStateOf<Exercise?>(null) }
     var showEditDialog by remember { mutableStateOf(false) }
     var deleteExercise by remember { mutableStateOf<Exercise?>(null) }
@@ -156,11 +157,24 @@ fun ExerciseLibraryScreen(onBack: () -> Unit) {
         )
     }
 
+    deleteError?.let { message ->
+        AlertDialog(
+            onDismissRequest = { vm.clearDeleteError() },
+            title = { Text("Нельзя удалить") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = { vm.clearDeleteError() }) {
+                    Text("Понятно")
+                }
+            }
+        )
+    }
+
     deleteExercise?.let { ex ->
         AlertDialog(
             onDismissRequest = { deleteExercise = null },
             title = { Text("Удалить упражнение?") },
-            text = { Text("«${ex.name}» будет удалено из справочника. Записи в тренировках не пострадают.") },
+            text = { Text("«${ex.name}» будет удалено из справочника. Название в старых тренировках останется без изменений.") },
             confirmButton = {
                 TextButton(onClick = {
                     vm.deleteExercise(ex)

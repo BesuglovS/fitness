@@ -36,6 +36,10 @@ class ProgressViewModel(repository: FitnessRepository) : ViewModel() {
         if (ex == null) flowOf(null) else repository.maxWeight(ex.id)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
+    val best1RM = selectedExercise.flatMapLatest { ex ->
+        if (ex == null) flowOf(null) else repository.best1RM(ex.id)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
     val totalWorkouts = repository.workoutCount()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 

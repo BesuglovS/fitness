@@ -19,6 +19,9 @@ interface ExerciseDao {
     @Query("SELECT * FROM exercises WHERE id = :id")
     suspend fun getById(id: Long): Exercise?
 
+    @Query("SELECT COUNT(*) FROM workout_exercises WHERE exerciseId = :exerciseId")
+    suspend fun countUsages(exerciseId: Long): Int
+
     @Insert
     suspend fun insert(exercise: Exercise): Long
 

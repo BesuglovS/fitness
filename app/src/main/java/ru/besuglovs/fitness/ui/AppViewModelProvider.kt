@@ -33,14 +33,14 @@ object AppViewModelProvider {
             val app = this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY] as FitnessApp
             val handle = createSavedStateHandle()
             val id = handle.get<Long>("workoutId") ?: 0L
-            val restSeconds = handle.get<Int>("restSeconds") ?: 240
+            val restSeconds = handle.get<Int>("restSeconds") ?: 90
             WorkoutViewModel(app, id, restSeconds)
         }
         initializer {
             val app = this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY] as FitnessApp
             val handle = createSavedStateHandle()
             val id = handle.get<Long>("workoutId") ?: 0L
-            val restSeconds = handle.get<Int>("restSeconds") ?: 240
+            val restSeconds = handle.get<Int>("restSeconds") ?: 90
             CircuitViewModel(app, id, restSeconds)
         }
         initializer {

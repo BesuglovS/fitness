@@ -1,5 +1,10 @@
 package ru.besuglovs.fitness.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -26,15 +31,17 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import ru.besuglovs.fitness.ui.AppViewModelProvider
@@ -44,13 +51,45 @@ import ru.besuglovs.fitness.ui.viewmodel.SettingsViewModel
 @Composable
 fun SettingsScreen() {
     val vm: SettingsViewModel = viewModel(factory = AppViewModelProvider.Factory)
+    val context = LocalContext.current
 
     val exportMessage by vm.exportMessage.collectAsStateWithLifecycle()
 
     var restSecondsText by remember { mutableStateOf(vm.defaultRestSeconds.value.toString()) }
+    var restFieldFocused by remember { mutableStateOf(false) }
+    var showExportDenied by remember { mutableStateOf(false) }
 
-    LaunchedEffect(vm.defaultRestSeconds.value) {
+    fun commitRestSeconds() {
+        val parsed = restSecondsText.toIntOrNull()?.coerceIn(10, 600)
+        if (parsed != null) {
+            vm.setDefaultRestSeconds(parsed)
+        }
         restSecondsText = vm.defaultRestSeconds.value.toString()
+    }
+
+    val storagePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            vm.exportData()
+        } else {
+            showExportDenied = true
+        }
+    }
+
+    fun startExport() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            vm.exportData()
+            return
+        }
+        val permission = Manifest.permission.WRITE_EXTERNAL_STORAGE
+        val granted = ContextCompat.checkSelfPermission(context, permission) ==
+            PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            vm.exportData()
+        } else {
+            storagePermissionLauncher.launch(permission)
+        }
     }
 
     Scaffold(
@@ -73,8 +112,7 @@ fun SettingsScreen() {
                         OutlinedTextField(
                             value = restSecondsText,
                             onValueChange = { value ->
-                                restSecondsText = value.filter { it.isDigit() }
-                                restSecondsText.toIntOrNull()?.let { vm.setDefaultRestSeconds(it) }
+                                restSecondsText = value.filter { it.isDigit() }.take(4)
                             },
                             label = { Text("Секунд") },
                             singleLine = true,
@@ -82,6 +120,12 @@ fun SettingsScreen() {
                             modifier = Modifier
                                 .width(120.dp)
                                 .padding(top = 8.dp)
+                                .onFocusChanged { state ->
+                                    if (restFieldFocused && !state.isFocused) {
+                                        commitRestSeconds()
+                                    }
+                                    restFieldFocused = state.isFocused
+                                }
                         )
                     }
                 )
@@ -92,12 +136,20 @@ fun SettingsScreen() {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Button(
-                        onClick = { vm.exportData() },
+                        onClick = { startExport() },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Icon(Icons.Filled.CloudUpload, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
                         Text("Экспортировать данные (JSON)")
+                    }
+                    if (showExportDenied) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Нет разрешения на запись в Downloads. Разрешите доступ к хранилищу и повторите.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
                     }
                     exportMessage?.let {
                         Spacer(Modifier.height(8.dp))

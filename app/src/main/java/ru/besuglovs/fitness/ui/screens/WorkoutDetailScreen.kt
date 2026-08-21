@@ -204,7 +204,7 @@ private fun downsampleHeartRate(
     return values to labels
 }
 
-private fun samplesForSet(
+internal fun samplesForSet(
     samples: List<HeartRateSample>,
     set: SetEntry
 ): List<HeartRateSample> {
@@ -214,12 +214,12 @@ private fun samplesForSet(
     return samples.filter { it.timestamp in start..end }
 }
 
-private data class HrPhase(
+internal data class HrPhase(
     val samples: List<HeartRateSample>,
     val isRest: Boolean
 )
 
-private fun restSamplesForSet(
+internal fun restSamplesForSet(
     samples: List<HeartRateSample>,
     set: SetEntry,
     nextSetStart: Long? = null
@@ -233,7 +233,7 @@ private fun restSamplesForSet(
     return samples.filter { it.timestamp in start..end }
 }
 
-private fun buildSetPhases(
+internal fun buildSetPhases(
     samples: List<HeartRateSample>,
     set: SetEntry,
     nextSetStart: Long? = null
@@ -242,6 +242,19 @@ private fun buildSetPhases(
     val rest = restSamplesForSet(samples, set, nextSetStart)
     if (set.restSeconds != null || rest.isNotEmpty()) {
         phases.add(HrPhase(rest, isRest = true))
+    }
+    return phases
+}
+
+internal fun buildExercisePhases(
+    samples: List<HeartRateSample>,
+    sets: List<SetEntry>
+): List<HrPhase> {
+    val ordered = sets.sortedBy { it.setNumber }
+    val phases = mutableListOf<HrPhase>()
+    ordered.forEachIndexed { i, set ->
+        val nextStart = ordered.getOrNull(i + 1)?.setStartTime
+        phases.addAll(buildSetPhases(samples, set, nextStart))
     }
     return phases
 }
@@ -259,13 +272,13 @@ private fun buildCirclePhases(
     return phases
 }
 
-private data class HrChartData(
+internal data class HrChartData(
     val values: List<Float>,
     val labels: List<String>,
     val zones: List<ChartZone>
 )
 
-private fun downsampleWithBase(
+internal fun downsampleWithBase(
     samples: List<HeartRateSample>,
     base: Long,
     maxPoints: Int = 8
@@ -283,7 +296,7 @@ private fun downsampleWithBase(
     return values to labels
 }
 
-private fun buildChartData(
+internal fun buildChartData(
     phases: List<HrPhase>,
     setColor: androidx.compose.ui.graphics.Color,
     restColor: androidx.compose.ui.graphics.Color
@@ -320,7 +333,7 @@ private fun heartRateLabel(set: SetEntry): String =
     }
 
 @Composable
-private fun HeartRateSection(
+internal fun HeartRateSection(
     label: String,
     phases: List<HrPhase>,
     modifier: Modifier = Modifier
@@ -399,7 +412,8 @@ private fun CircuitDetailList(
                 item {
                     CircuitCircleCard(circleNumber = circle, exercises = exercises, heartRateSamples = heartRateSamples)
                 }
-                val restSeconds = interRoundRestSeconds(exercises, circle)
+                // Отдых после последнего круга не показываем — «между кругами» его нет.
+                val restSeconds = if (circle < maxCircles) interRoundRestSeconds(exercises, circle) else null
                 if (restSeconds != null) {
                     item {
                         CircuitRoundRestBlock(restSeconds = restSeconds)
@@ -806,16 +820,28 @@ private fun CircuitRoundRestBlock(restSeconds: Int?) {
     }
 }
 
-private fun pluralCircles(count: Int): String = when (count) {
-    1 -> "круг"
-    2, 3, 4 -> "круга"
-    else -> "кругов"
-}
+private fun pluralCircles(count: Int): String = pluralize(
+    count,
+    one = "круг",
+    few = "круга",
+    many = "кругов"
+)
 
-private fun pluralExercises(count: Int): String = when (count) {
-    1 -> "упражнение"
-    2, 3, 4 -> "упражнения"
-    else -> "упражнений"
+private fun pluralExercises(count: Int): String = pluralize(
+    count,
+    one = "упражнение",
+    few = "упражнения",
+    many = "упражнений"
+)
+
+private fun pluralize(count: Int, one: String, few: String, many: String): String {
+    val mod100 = count % 100
+    if (mod100 in 11..14) return many
+    return when (count % 10) {
+        1 -> one
+        in 2..4 -> few
+        else -> many
+    }
 }
 
 @Composable
@@ -893,17 +919,43 @@ private fun ExerciseDetailCard(
     heartRateSamples: List<HeartRateSample>
 ) {
     var expandedKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var exerciseExpanded by rememberSaveable { mutableStateOf(false) }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text(we.exerciseName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            if (we.muscleGroup.isNotBlank()) {
-                Text(
-                    we.muscleGroup,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { exerciseExpanded = !exerciseExpanded }
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        we.exerciseName,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        if (exerciseExpanded) "▲" else "▼",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (we.muscleGroup.isNotBlank()) {
+                    Text(
+                        we.muscleGroup,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             Spacer(Modifier.height(8.dp))
+            if (exerciseExpanded) {
+                HeartRateSection(
+                    label = "Пульс упражнения целиком",
+                    phases = buildExercisePhases(heartRateSamples, we.sets)
+                )
+                Spacer(Modifier.height(8.dp))
+            }
 
             // header
             Row(modifier = Modifier.fillMaxWidth()) {

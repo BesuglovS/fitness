@@ -35,6 +35,17 @@ interface StatsDao {
 
     @Query(
         """
+        SELECT MAX(s.weightKg * (1.0 + s.reps / 30.0)) FROM set_entries s
+        JOIN workout_exercises we ON we.id = s.workoutExerciseId
+        JOIN workouts w ON w.id = we.workoutId
+        WHERE we.exerciseId = :exerciseId AND w.endTime IS NOT NULL
+            AND s.weightKg IS NOT NULL AND s.reps IS NOT NULL AND s.weightKg > 0
+        """
+    )
+    fun best1RM(exerciseId: Long): Flow<Double?>
+
+    @Query(
+        """
         SELECT w.startTime AS workoutStart, MAX(s.weightKg) AS maxWeight, MAX(s.reps) AS maxReps, SUM(s.weightKg * s.reps) AS volume
         FROM workouts w
         JOIN workout_exercises we ON we.workoutId = w.id

@@ -11,6 +11,7 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
@@ -68,14 +69,21 @@ class HeartRateSensor(context: Context) {
     private var autoReconnectInProgress = false
 
     @Volatile
+    private var autoRetryInProgress = false
+
+    @Volatile
     private var wasConnected = false
 
     @Volatile
     private var everConnected = false
 
+    @Volatile
+    private var reconnectAttempts = 0
+
     private var gatt: BluetoothGatt? = null
     private var scanCallback: ScanCallback? = null
     private var timeoutRunnable: Runnable? = null
+    private var reconnectRunnable: Runnable? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -89,6 +97,7 @@ class HeartRateSensor(context: Context) {
         if (savedMac != null) {
             val device = runCatching { adapter.getRemoteDevice(savedMac) }.getOrNull()
             if (device != null) {
+                reconnectAttempts = 0
                 autoReconnectInProgress = true
                 connectToDevice(device)
                 return@withContext true
@@ -103,7 +112,7 @@ class HeartRateSensor(context: Context) {
         if (!hasRequiredPermissions()) return@withContext false
         val device = runCatching { adapter.getRemoteDevice(address) }.getOrNull()
         if (device == null) return@withContext false
-        prefs.edit().putString(KEY_LAST_MAC, address).apply()
+        reconnectAttempts = 0
         connectToDevice(device)
         true
     }
@@ -115,8 +124,10 @@ class HeartRateSensor(context: Context) {
 
     fun cancelScan() {
         stopScan()
-        _status.value = HeartRateStatus.DISCONNECTED
         _discoveredDevices.value = emptyList()
+        if (_status.value == HeartRateStatus.SCANNING) {
+            _status.value = HeartRateStatus.DISCONNECTED
+        }
     }
 
     fun forgetLastDevice() {
@@ -125,10 +136,14 @@ class HeartRateSensor(context: Context) {
 
     fun disconnect() {
         timeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        reconnectRunnable = null
         stopScan()
         autoReconnectInProgress = false
+        autoRetryInProgress = false
         wasConnected = false
         everConnected = false
+        reconnectAttempts = 0
         gatt?.disconnect()
         gatt?.close()
         gatt = null
@@ -180,7 +195,10 @@ class HeartRateSensor(context: Context) {
             }
         }
         scanCallback = callback
-        scanner.startScan(callback)
+        val settings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
+            .build()
+        scanner.startScan(emptyList(), settings, callback)
         timeoutRunnable = Runnable {
             stopScan()
         }.also { mainHandler.postDelayed(it, SCAN_TIMEOUT_MS) }
@@ -208,27 +226,39 @@ class HeartRateSensor(context: Context) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     wasConnected = true
                     autoReconnectInProgress = false
+                    autoRetryInProgress = false
+                    reconnectAttempts = 0
                     everConnected = true
+                    prefs.edit().putString(KEY_LAST_MAC, gatt.device.address).apply()
                     gatt.discoverServices()
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    this@HeartRateSensor.gatt?.close()
+                    val stored = this@HeartRateSensor.gatt
+                    if (stored != null && stored !== gatt) {
+                        // Устаревший колбэк от заменённого подключения — не трогаем новое.
+                        runCatching { gatt.close() }
+                        return
+                    }
+                    stored?.close()
                     this@HeartRateSensor.gatt = null
-                    val failedReconnect = autoReconnectInProgress && !wasConnected
-                    autoReconnectInProgress = false
-                    wasConnected = false
                     _bpm.value = null
-                    if (failedReconnect) {
+                    val failedInitialReconnect = autoReconnectInProgress && !wasConnected
+                    val failedAutoRetry = autoRetryInProgress && !wasConnected
+                    autoReconnectInProgress = false
+                    autoRetryInProgress = false
+                    wasConnected = false
+                    if (failedInitialReconnect) {
                         everConnected = false
                         prefs.edit().remove(KEY_LAST_MAC).apply()
                         startScan()
+                    } else if (failedAutoRetry) {
+                        _status.value = HeartRateStatus.LOST
+                        scheduleAutoReconnect()
                     } else {
-                        _status.value = if (everConnected) {
-                            HeartRateStatus.LOST
-                        } else {
-                            HeartRateStatus.DISCONNECTED
-                        }
+                        val lost = everConnected
                         everConnected = false
+                        _status.value = if (lost) HeartRateStatus.LOST else HeartRateStatus.DISCONNECTED
+                        if (lost) scheduleAutoReconnect()
                     }
                 }
             }
@@ -245,23 +275,62 @@ class HeartRateSensor(context: Context) {
                 ?: run { gatt.disconnect(); return }
             gatt.setCharacteristicNotification(characteristic, true)
             characteristic.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG_UUID)?.let { descriptor ->
-                descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                gatt.writeDescriptor(descriptor)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                } else {
+                    @Suppress("DEPRECATION")
+                    descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    @Suppress("DEPRECATION")
+                    gatt.writeDescriptor(descriptor)
+                }
             }
         }
 
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray
+        ) {
+            // Вызывается на API 33+; super не вызываем, чтобы старый колбэк не сработал повторно.
+            handleHeartRateMeasurement(characteristic.uuid, value)
+        }
+
+        @Deprecated("Deprecated in Java")
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
-            if (characteristic.uuid != HEART_RATE_MEASUREMENT_UUID) return
-            val value = parseHeartRate(characteristic.value) ?: return
-            _bpm.value = value
-            _readings.tryEmit(value)
-            if (_status.value != HeartRateStatus.CONNECTED) {
-                _status.value = HeartRateStatus.CONNECTED
-            }
+            // Вызывается на API < 33 (на 33+ значение в characteristic устаревшее).
+            handleHeartRateMeasurement(characteristic.uuid, characteristic.value)
         }
+    }
+
+    private fun handleHeartRateMeasurement(uuid: UUID?, data: ByteArray?) {
+        if (uuid != HEART_RATE_MEASUREMENT_UUID) return
+        val parsed = parseHeartRate(data) ?: return
+        _bpm.value = parsed
+        _readings.tryEmit(parsed)
+        if (_status.value != HeartRateStatus.CONNECTED) {
+            _status.value = HeartRateStatus.CONNECTED
+        }
+    }
+
+    private fun scheduleAutoReconnect() {
+        if (reconnectAttempts >= MAX_AUTO_RECONNECT_ATTEMPTS) return
+        val mac = prefs.getString(KEY_LAST_MAC, null) ?: return
+        reconnectAttempts++
+        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        val runnable = Runnable {
+            reconnectRunnable = null
+            if (_status.value != HeartRateStatus.LOST) return@Runnable
+            val a = adapter ?: return@Runnable
+            if (!a.isEnabled || !hasRequiredPermissions()) return@Runnable
+            val device = runCatching { a.getRemoteDevice(mac) }.getOrNull() ?: return@Runnable
+            autoRetryInProgress = true
+            connectToDevice(device)
+        }
+        reconnectRunnable = runnable
+        mainHandler.postDelayed(runnable, AUTO_RECONNECT_DELAY_MS)
     }
 
     private fun parseHeartRate(data: ByteArray?): Int? {
@@ -278,6 +347,8 @@ class HeartRateSensor(context: Context) {
     companion object {
         private const val KEY_LAST_MAC = "last_mac"
         private const val SCAN_TIMEOUT_MS = 15000L
+        private const val MAX_AUTO_RECONNECT_ATTEMPTS = 3
+        private const val AUTO_RECONNECT_DELAY_MS = 3000L
         val HEART_RATE_SERVICE_UUID: UUID =
             UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb")
         val HEART_RATE_MEASUREMENT_UUID: UUID =

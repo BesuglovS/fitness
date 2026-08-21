@@ -12,6 +12,7 @@ class FitnessRepository(private val db: AppDatabase) {
     // Exercises
     fun exercises(): Flow<List<Exercise>> = db.exerciseDao().getAll()
     suspend fun getExercise(id: Long): Exercise? = db.exerciseDao().getById(id)
+    suspend fun exerciseUsageCount(exerciseId: Long): Int = db.exerciseDao().countUsages(exerciseId)
     suspend fun insertExercise(exercise: Exercise): Long = db.exerciseDao().insert(exercise)
     suspend fun updateExercise(exercise: Exercise) = db.exerciseDao().update(exercise)
     suspend fun deleteExercise(exercise: Exercise) = db.exerciseDao().delete(exercise)
@@ -53,6 +54,7 @@ class FitnessRepository(private val db: AppDatabase) {
     // Stats
     fun progression(exerciseId: Long): Flow<List<ProgressPoint>> = db.statsDao().progression(exerciseId)
     fun maxWeight(exerciseId: Long): Flow<Double?> = db.statsDao().maxWeight(exerciseId)
+    fun best1RM(exerciseId: Long): Flow<Double?> = db.statsDao().best1RM(exerciseId)
     fun overallVolumeTimeline(): Flow<List<ProgressPoint>> = db.statsDao().overallVolumeTimeline()
     fun workoutCount(): Flow<Int> = db.statsDao().workoutCount()
     fun exerciseCount(): Flow<Int> = db.statsDao().exerciseCount()

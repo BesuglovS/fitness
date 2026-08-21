@@ -3,6 +3,7 @@ package ru.besuglovs.fitness.ui.viewmodel
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -126,8 +127,34 @@ class WorkoutViewModel(
     private val _heartRateDevices = MutableStateFlow<List<ScannedDevice>>(emptyList())
     val heartRateDevices: StateFlow<List<ScannedDevice>> = _heartRateDevices.asStateFlow()
 
-    private val heartRateSamples = mutableListOf<HeartRateSample>()
+    private val hrSampleList = mutableListOf<HeartRateSample>()
     private var heartRateSavedCount = 0
+    private val hrLoaded = CompletableDeferred<Unit>()
+
+    private val _heartRateSamples = MutableStateFlow<List<HeartRateSample>>(emptyList())
+    val heartRateSamples: StateFlow<List<HeartRateSample>> = _heartRateSamples.asStateFlow()
+
+    private fun publishHeartRate() {
+        _heartRateSamples.value = hrSampleList.toList()
+    }
+
+    private val _pendingEntrySet = MutableStateFlow<WorkoutRecordedSet?>(null)
+    val pendingEntrySet: StateFlow<WorkoutRecordedSet?> = _pendingEntrySet.asStateFlow()
+
+    private fun buildPendingEntrySet(restSec: Int?): WorkoutRecordedSet? {
+        val exId = _entryExerciseId.value ?: return null
+        val duration = _setDurations[exId]?.lastOrNull() ?: 0
+        return WorkoutRecordedSet(
+            weight = entryWeightValue(),
+            reps = entryRepsValue(),
+            durationSeconds = duration,
+            restSeconds = restSec,
+            doneAt = _pendingDoneAt.takeIf { it > 0 },
+            startTime = pendingSetStart.takeIf { it > 0 },
+            avgHeartRate = pendingSetAvgHr,
+            maxHeartRate = pendingSetMaxHr
+        )
+    }
 
     private var setJob: Job? = null
     private var restJob: Job? = null
@@ -159,21 +186,28 @@ class WorkoutViewModel(
         }
         viewModelScope.launch {
             heartRateSensor.readings.collect { bpm ->
-                heartRateSamples.add(
+                hrLoaded.await()
+                hrSampleList.add(
                     HeartRateSample(
                         workoutId = workoutId,
                         timestamp = System.currentTimeMillis(),
                         bpm = bpm
                     )
                 )
-                _heartRateRecorded.value = heartRateSamples.size
+                _heartRateRecorded.value = hrSampleList.size
+                publishHeartRate()
             }
         }
         viewModelScope.launch {
-            val existing = repository.heartRateSamplesOnce(workoutId)
-            heartRateSamples.addAll(existing)
-            heartRateSavedCount = heartRateSamples.size
-            _heartRateRecorded.value = heartRateSamples.size
+            try {
+                val existing = repository.heartRateSamplesOnce(workoutId)
+                hrSampleList.addAll(existing)
+                heartRateSavedCount = hrSampleList.size
+                _heartRateRecorded.value = hrSampleList.size
+                publishHeartRate()
+            } finally {
+                hrLoaded.complete(Unit)
+            }
         }
         viewModelScope.launch {
             val workout = repository.getWorkoutOnce(workoutId)
@@ -315,6 +349,7 @@ class WorkoutViewModel(
         _entryReps.value = _setupReps.value[exId] ?: ""
         _phase.value = WorkoutPhase.REST
         _restElapsed.value = 0L
+        _pendingEntrySet.value = buildPendingEntrySet(0)
         _restPaused.value = false
         startRestTimer()
     }
@@ -379,7 +414,7 @@ class WorkoutViewModel(
 
     private fun computeSetHrStats(start: Long, end: Long): Pair<Int?, Int?> {
         if (start <= 0 || end <= start) return null to null
-        val samples = heartRateSamples.filter { it.timestamp in start..end }
+        val samples = hrSampleList.filter { it.timestamp in start..end }
         if (samples.isEmpty()) return null to null
         return samples.map { it.bpm }.average().toInt() to samples.maxOf { it.bpm }
     }
@@ -411,16 +446,22 @@ class WorkoutViewModel(
         _setPaused.value = initialPaused
         _pauseElapsed.value = initialPauseElapsed
         setJob = viewModelScope.launch {
+            var lastTick = System.currentTimeMillis()
             while (_phase.value == WorkoutPhase.EXERCISE) {
-                delay(1000)
+                delay(500)
+                val now = System.currentTimeMillis()
+                val delta = (now - lastTick) / 1000
+                if (delta <= 0) continue
+                lastTick += delta * 1000
                 if (_setPaused.value) {
-                    _pauseElapsed.value += 1
+                    _pauseElapsed.value += delta
                 } else {
-                    setRunningSeconds += 1
+                    setRunningSeconds += delta
                     _setElapsed.value = setRunningSeconds
                 }
             }
         }
+        _pendingEntrySet.value = null
     }
 
     private fun startRestTimer(initialElapsed: Long? = null) {
@@ -428,10 +469,16 @@ class WorkoutViewModel(
         if (initialElapsed != null) _restElapsed.value = initialElapsed
         _restPaused.value = false
         restJob = viewModelScope.launch {
+            var lastTick = System.currentTimeMillis()
             while (_phase.value == WorkoutPhase.REST) {
-                delay(1000)
+                delay(500)
+                val now = System.currentTimeMillis()
+                val delta = (now - lastTick) / 1000
+                if (delta <= 0) continue
+                lastTick += delta * 1000
                 if (!_restPaused.value) {
-                    _restElapsed.value += 1
+                    _restElapsed.value += delta
+                    _pendingEntrySet.value = buildPendingEntrySet(_restElapsed.value.toInt())
                 }
             }
         }
@@ -447,7 +494,12 @@ class WorkoutViewModel(
     fun finishWorkout() {
         viewModelScope.launch {
             stopTimers()
-            _entryExerciseId.value?.let { commitEntrySet(it) }
+            // Коммитим отложенный подход только если он реально завершён (фаза REST);
+            // во время выполнения подхода вес/повторы ещё не введены — иначе был бы дубль.
+            if (_phase.value == WorkoutPhase.REST) {
+                _entryExerciseId.value?.let { commitEntrySet(it) }
+            }
+            _pendingEntrySet.value = null
             val exercisesWithSets = _completedSets.value
                 .filter { it.value.isNotEmpty() }
                 .map { (exId, sets) ->
@@ -474,10 +526,10 @@ class WorkoutViewModel(
                 notes = "",
                 exercises = exercisesWithSets
             )
-            val pending = heartRateSamples.drop(heartRateSavedCount)
+            val pending = hrSampleList.drop(heartRateSavedCount)
             if (pending.isNotEmpty()) {
                 repository.saveHeartRateSamples(pending)
-                heartRateSavedCount = heartRateSamples.size
+                heartRateSavedCount = hrSampleList.size
             }
             heartRateSensor.disconnect()
             _saved.value = true
@@ -487,11 +539,12 @@ class WorkoutViewModel(
     fun saveAndExit() {
         viewModelScope.launch {
             stopTimers()
+            _pendingEntrySet.value = null
             repository.saveSession(workoutId, buildSessionJson(), isCircuit = false)
-            val pending = heartRateSamples.drop(heartRateSavedCount)
+            val pending = hrSampleList.drop(heartRateSavedCount)
             if (pending.isNotEmpty()) {
                 repository.saveHeartRateSamples(pending)
-                heartRateSavedCount = heartRateSamples.size
+                heartRateSavedCount = hrSampleList.size
             }
             _exited.value = true
         }

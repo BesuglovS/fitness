@@ -37,7 +37,7 @@ Android-приложение для ведения дневника тренир
 | Файл | Назначение |
 |------|------------|
 | `FitnessApp.kt` | `Application`. Обёртка DI вручную: лениво создаёт `AppDatabase`, `FitnessRepository`, `SettingsStorage`. Доступны как `fitnessApp.repository` / `settings`. |
-| `MainActivity.kt` | `ComponentActivity`. `setContent { FitnessTheme { FitnessRoot() } }` + навигация. Включает `FLAG_KEEP_SCREEN_ON`. |
+| `MainActivity.kt` | `ComponentActivity`. `setContent { FitnessTheme { FitnessRoot() } }` + навигация. `FLAG_KEEP_SCREEN_ON` включается только на экранах тренировок (`KeepScreenOn`). |
 | `AppViewModelProvider.kt` | Фабрика ViewModel. Через `initializer` расписывает создание каждого ViewModel, извлекая аргументы (`workoutId`, `restSeconds`) из `SavedStateHandle`. |
 
 ### 2. UI-слой (`ru.besuglovs.fitness.ui`)
@@ -113,23 +113,29 @@ Android-приложение для ведения дневника тренир
 ### 4. BLE-слой (`ru.besuglovs.fitness.ble`)
 - `HeartRateSensor` — клиент BLE-пульсометра H808S (COOSPO). Использует стандартный сервис
   Heart Rate (0x180D) и характеристику Heart Rate Measurement (0x2A37):
-  - сканирование устройств (имя содержит «h808» или объявляет сервис 0x180D) с таймаутом 15 с;
+  - сканирование устройств (имя содержит «h808» или объявляет сервис 0x180D) с таймаутом 15 с
+    в режиме `SCAN_MODE_BALANCED`;
     найденные кандидаты накапливаются в `StateFlow<List<ScannedDevice>>` (без дублей, с RSSI),
     авто-подключение по первому совпадению не выполняется — устройство выбирает пользователь;
-  - быстрое переподключение к сохранённому MAC (`SharedPreferences`); при неудачном
-    авто-подключении MAC очищается и запускается сканирование;
-  - `connect(address)` — подключение к выбранному устройству с запоминанием MAC;
+  - быстрое переподключение к сохранённому MAC (`SharedPreferences`); MAC сохраняется только
+    при успешном подключении (STATE_CONNECTED); при неудачном авто-подключении MAC очищается
+    и запускается сканирование;
+  - автоматическое переподключение при потере связи: до 3 попыток с интервалом 3 с;
+  - `connect(address)` — подключение к выбранному устройству;
     `scanForDevices()`/`cancelScan()`/`forgetLastDevice()` — управление поиском и памятью;
   - запрос прав на выполнение сканирования начиная с Android 12 и прав на определение
     местоположения на более старых версиях;
-  - разбор данных ЧСС (формат 8/16 бит по флагам характеристики);
+  - разбор данных ЧСС (формат 8/16 бит по флагам характеристики); уведомления принимаются
+    через новый колбэк `onCharacteristicChanged(gatt, characteristic, value)` на API 33+
+    и через устаревший — на более ранних версиях; запись CCCD-дескриптора также разделена по версиям;
   - реактивная модель: `status`/`bpm`/`deviceName`/`discoveredDevices` как `StateFlow`,
     поток показаний `readings` как `SharedFlow`.
 
 ### 5. DI / Прочие
 - `SettingsStorage.kt` — `SharedPreferences` (`fitness_settings`), хранит `defaultRestSeconds` (по умолч. 240).
 - `util/` — `Formats.kt` (форматирование дат/времени/веса, 1ПМ по формуле Эпли),
-  `ExportUtils.kt` (экспорт всего в JSON в Downloads через MediaStore, включая показания пульса).
+  `ExportUtils.kt` (экспорт всего в JSON в Downloads через MediaStore, включая показания пульса;
+  на API < 29 — с runtime-запросом `WRITE_EXTERNAL_STORAGE`).
 
 ## ViewModel («тонкие», держат UI-состояние в MutableStateFlow)
 

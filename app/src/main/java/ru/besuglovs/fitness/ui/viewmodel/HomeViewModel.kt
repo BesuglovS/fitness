@@ -22,6 +22,10 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
 
     val defaultRestSeconds = MutableStateFlow(settings.defaultRestSeconds)
 
+    fun refreshDefaultRest() {
+        defaultRestSeconds.value = settings.defaultRestSeconds
+    }
+
     val recentWorkouts = repository.workouts()
         .map { workouts -> workouts.filter { it.endTime != null }.take(5) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList<Workout>())
