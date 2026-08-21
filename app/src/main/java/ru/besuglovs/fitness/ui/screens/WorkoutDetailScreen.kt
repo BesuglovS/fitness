@@ -216,7 +216,9 @@ internal fun samplesForSet(
 
 internal data class HrPhase(
     val samples: List<HeartRateSample>,
-    val isRest: Boolean
+    val isRest: Boolean,
+    val weightKg: Double? = null,
+    val reps: Int? = null
 )
 
 internal fun restSamplesForSet(
@@ -238,7 +240,14 @@ internal fun buildSetPhases(
     set: SetEntry,
     nextSetStart: Long? = null
 ): List<HrPhase> {
-    val phases = mutableListOf(HrPhase(samplesForSet(samples, set), isRest = false))
+    val phases = mutableListOf(
+        HrPhase(
+            samples = samplesForSet(samples, set),
+            isRest = false,
+            weightKg = set.weightKg,
+            reps = set.reps
+        )
+    )
     val rest = restSamplesForSet(samples, set, nextSetStart)
     if (set.restSeconds != null || rest.isNotEmpty()) {
         phases.add(HrPhase(rest, isRest = true))
@@ -310,6 +319,9 @@ internal fun buildChartData(
     phases.forEach { phase ->
         val (vals, lbls) = downsampleWithBase(phase.samples, base)
         if (vals.isEmpty()) return@forEach
+        val phaseMin = phase.samples.minOf { it.bpm }
+        val phaseMax = phase.samples.maxOf { it.bpm }
+        val phaseAvg = phase.samples.map { it.bpm }.average().toInt()
         values.addAll(vals)
         labels.addAll(lbls)
         zones.add(
@@ -317,7 +329,13 @@ internal fun buildChartData(
                 startIndex = offset,
                 endIndex = offset + vals.size,
                 color = if (phase.isRest) restColor else setColor,
-                label = if (phase.isRest) "Отдых" else "Подход"
+                label = if (phase.isRest) "Отдых" else "Подход",
+                topLabel = "$phaseMin/$phaseAvg/$phaseMax",
+                bottomLabel = if (!phase.isRest) {
+                    "${weightLabel(phase.weightKg)}/${phase.reps ?: "-"}"
+                } else {
+                    null
+                }
             )
         )
         offset += vals.size

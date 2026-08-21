@@ -32,7 +32,9 @@ data class ChartZone(
     val startIndex: Int,
     val endIndex: Int,
     val color: Color,
-    val label: String
+    val label: String,
+    val topLabel: String? = null,
+    val bottomLabel: String? = null
 )
 
 @Composable
@@ -168,6 +170,32 @@ fun LineChart(
                 // dots
                 values.forEachIndexed { i, v ->
                     drawCircle(colorAt(i), radius = 3.dp.toPx(), center = Offset(xOf(i), yOf(v)))
+                }
+
+                // zone annotations
+                val zoneLabelPaint = Paint().apply {
+                    textSize = 9.sp.toPx()
+                    textAlign = Paint.Align.CENTER
+                }
+                zones.forEach { zone ->
+                    if (zone.endIndex > zone.startIndex &&
+                        (zone.topLabel != null || zone.bottomLabel != null)
+                    ) {
+                        val zLeft = max(left, xOf(zone.startIndex) - halfStep)
+                        val zRight = min(right, xOf(zone.endIndex - 1) + halfStep)
+                        val centerX = (zLeft + zRight) / 2f
+                        zoneLabelPaint.color = zone.color.toArgb()
+                        zone.topLabel?.let { text ->
+                            drawContext.canvas.nativeCanvas.drawText(
+                                text, centerX, top + 12.dp.toPx(), zoneLabelPaint
+                            )
+                        }
+                        zone.bottomLabel?.let { text ->
+                            drawContext.canvas.nativeCanvas.drawText(
+                                text, centerX, bottom - 3.dp.toPx(), zoneLabelPaint
+                            )
+                        }
+                    }
                 }
             }
 
